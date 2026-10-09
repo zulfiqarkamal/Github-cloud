@@ -1,6 +1,8 @@
 # Quality Momentum: a rule-based US stock strategy (paper trading only)
 
-These are research tools. Nothing here places live trades: the order script only connects to an IBKR **paper** account.
+These are research tools plus a fully automatic **paper-trading** robot. Nothing here uses real money unless you flip one setting yourself (`LIVE_TRADING`, see below).
+
+**Jump to:** [Automatic mode: 4 setup steps](#automatic-mode-set-up-once-runs-by-itself)
 
 ## Which approach, and why
 
@@ -113,3 +115,46 @@ There are two ways:
 - A cron job on your computer runs the script and posts `orders.json` to an n8n webhook, which emails or messages you the list.
 
 Keep a human approval step before anything is sent, even to paper.
+
+## Automatic mode (set up once, runs by itself)
+
+Every weekday after the US market closes, GitHub runs `autotrader.py` in the cloud. Your computer doesn't need to be on.
+
+- **Every day:** any stock 20% below its purchase price is sold (rule 8).
+- **On the last trading day of each month:** the crash brake is checked (rule 7), and the portfolio is rebalanced to the top 10 (rules 1-6).
+- Orders are placed after the close, so they fill at the next market open.
+- Every action, error and "no trades today" message goes to your phone and to the GitHub run page.
+
+It runs on an **Alpaca paper account**: free, with fake money and real prices. I used Alpaca rather than IBKR because IBKR's API needs a computer that's always on, running IBKR's software and logged in every day. Alpaca works fully from the cloud.
+
+### The 4 steps
+
+1. **Paper trading account.** Sign up free at alpaca.markets; new accounts start in paper mode with $100k of fake money. In the paper dashboard, open **API Keys** and click **Generate New Keys**. Copy both the *Key* and the *Secret*.
+2. **Phone alerts.** Install the free **ntfy** app (iPhone or Android). Tap **+** and subscribe to a topic name only you know, such as `zk-trades-` followed by 6 random letters.
+3. **Add three secrets to GitHub.** In this repository, go to **Settings → Secrets and variables → Actions → New repository secret** and add:
+   - `ALPACA_KEY_ID`: the Key from step 1
+   - `ALPACA_SECRET_KEY`: the Secret from step 1
+   - `NTFY_TOPIC`: the topic name from step 2
+4. **Start it.** Go to the **Actions** tab and enable workflows if GitHub asks. Then:
+   - Open **Quality Momentum auto-trader (paper)**, click **Run workflow** and leave *dry run* ticked. Within a few minutes your phone should show what it *would* do.
+   - Run it once more with *dry run* **off** and *Run the monthly rebalance today* **on**. That buys the first portfolio.
+   - From then on it runs by itself.
+
+**Recommended: make the repository private** (Settings → General → Danger Zone → Change visibility), for two reasons:
+
+- Run logs in a public repository are public.
+- GitHub pauses schedules in public repositories after 60 days without changes.
+
+Private repositories get 2,000 free Actions minutes a month. This robot uses about 1–3 minutes a day.
+
+### Safety limits built in
+
+- **Paper only by default.** The real-money switch is a repository *variable* named `LIVE_TRADING`, which must be set to exactly `yes-real-money`. Even then you'd also need live API keys.
+- **Position size:** at most 10% of the account per stock (`STRATEGY_FRACTION` × 10%). For example, set the variable `STRATEGY_FRACTION` to `0.3` to use only 30% of the account.
+- **No leverage:** buys are capped by available cash and never use margin.
+- **Never two runs at once,** and no duplicate orders for a stock that already has an order waiting.
+- **If anything fails,** the run stops and sends an error alert to your phone.
+
+### Stopping it
+
+Go to the **Actions** tab, open the workflow, and click **⋯ → Disable workflow**. Open positions stay in the Alpaca account until you close them there.
