@@ -1,0 +1,62 @@
+name: Swing sleeve robot (paper)
+
+on:
+  schedule:
+    - cron: "45 21 * * 1-5"   # 21:45 UTC weekdays = US after-hours (17:45 ET summer, 16:45 ET winter)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview only, place no orders"
+        type: boolean
+        default: true
+
+concurrency: swing-trader
+
+permissions:
+  contents: write   # to append the news log to the swing-log branch
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ALPACA_SWING_KEY_ID: ${{ secrets.ALPACA_SWING_KEY_ID }}
+      ALPACA_SWING_SECRET_KEY: ${{ secrets.ALPACA_SWING_SECRET_KEY }}
+      ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SWING_CAPITAL: ${{ vars.SWING_CAPITAL }}
+      SWING_ENTRY: ${{ vars.SWING_ENTRY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: swing/requirements.txt
+      - run: pip install -r swing/requirements.txt
+      - name: Run
+        working-directory: swing
+        run: |
+          if [ -z "$ALPACA_SWING_KEY_ID" ]; then
+            echo "Swing sleeve not set up yet (no ALPACA_SWING_KEY_ID secret). Skipping." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
+          python trader.py $ARGS
+      - name: Save news log
+        if: always() && hashFiles('swing/news_log.jsonl') != ''
+        run: |
+          git config user.name "swing-robot"
+          git config user.email "swing-robot@users.noreply.github.com"
+          mv swing/news_log.jsonl "$RUNNER_TEMP/new.jsonl"
+          if git fetch origin swing-log; then
+            git checkout -B swing-log origin/swing-log
+          else
+            git checkout --orphan swing-log && git rm -rfq .
+          fi
+          cat "$RUNNER_TEMP/new.jsonl" >> news_log.jsonl
+          git add news_log.jsonl
+          git commit -m "News log $(date -u +%F)"
+          git push origin swing-log
