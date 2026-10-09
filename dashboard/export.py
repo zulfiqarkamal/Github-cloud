@@ -81,6 +81,43 @@ class ReadOnlyAlpaca:
             return {}
 
 
+    def closes(self, symbols, start):
+        """{symbol: [daily closes]} from the free IEX feed, for the small price graphs."""
+        out, token = {}, None
+        if not symbols:
+            return out
+        try:
+            while True:
+                params = {"symbols": ",".join(sorted(symbols)), "timeframe": "1Day", "start": start,
+                          "feed": "iex", "limit": 10000}
+                if token:
+                    params["page_token"] = token
+                page = self.get(DATA_URL + "/v2/stocks/bars", **params)
+                for sym, bars in (page.get("bars") or {}).items():
+                    out.setdefault(sym, []).extend(round(float(b["c"]), 2) for b in bars)
+                token = page.get("next_page_token")
+                if not token:
+                    return out
+        except Exception as e:  # graphs are nice to have, never fatal
+            print(f"(price history unavailable: {e})")
+            return out
+
+
+def usd_dkk():
+    """(rate, date) from the European Central Bank via frankfurter.app, or (None, None)."""
+    try:
+        r = requests.get("https://api.frankfurter.app/latest", params={"from": "USD", "to": "DKK"}, timeout=15)
+        r.raise_for_status()
+        j = r.json()
+        return round(float(j["rates"]["DKK"]), 4), j.get("date")
+    except Exception as e:
+        print(f"(USD/DKK rate unavailable: {e})")
+        return None, None
+
+
+SPARK_DAYS = 63  # about three months of trading days
+
+
 def _f(x, nd=2):
     return round(float(x), nd) if x not in (None, "") else None
 
@@ -211,6 +248,9 @@ def build(name, label, broker, now):
     pending = [{"symbol": o["symbol"], "side": o["side"], "qty": _f(o.get("qty") or 0, 4),
                 "type": o.get("type"), "limit": _f(o.get("limit_price")),
                 "placed": (o.get("submitted_at") or "")[:10]} for o in broker.open_orders()]
+    spark_start = (datetime.fromisoformat(today) - timedelta(days=100)).strftime("%Y-%m-%d")
+    spark = {k: v[-SPARK_DAYS:] for k, v in broker.closes(
+        {p["symbol"] for p in positions} | {o["symbol"] for o in pending}, spark_start).items()}
     opened_on = {}
     for o in orders:
         if o["side"] == "buy":
@@ -242,7 +282,7 @@ def build(name, label, broker, now):
                 for o in orders[-40:]][::-1]
     return {"robot": name, "label": label, "status": "live", "sample": False, "updated_at": now,
             "metrics": metrics, "curve": curve, "positions": pos, "pending": pending,
-            "next_run": next_run, "trades": trades[-200:][::-1], "activity": activity}
+            "next_run": next_run, "spark": spark, "trades": trades[-200:][::-1], "activity": activity}
 
 
 def main():
@@ -252,6 +292,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     failed = False
+    rate, rate_date = usd_dkk()
     for name, (label, key_var, secret_var) in ROBOTS.items():
         key, secret = os.environ.get(key_var), os.environ.get(secret_var)
         if not key or not secret:
@@ -264,6 +305,7 @@ def main():
                 failed = True
                 doc = {"robot": name, "label": label, "status": "error", "sample": False,
                        "updated_at": now, "note": f"Export failed: {str(e)[:200]}"}
+        doc["usd_dkk"], doc["fx_date"] = rate, rate_date
         with open(os.path.join(a.out, f"{name}.json"), "w") as f:
             json.dump(doc, f, separators=(",", ":"))
         print(f"{name}: {doc['status']}")

@@ -52,6 +52,10 @@ class FakeBroker:
         assert start == "2026-01-02" and end == "2026-03-08"
         return ["2026-01-02", "2026-01-12", "2026-01-20", "2026-01-30", "2026-02-27", "2026-03-02"]
 
+    def closes(self, symbols, start):
+        assert symbols == {"MSFT", "NVDA", "AMD"} and start == "2025-10-14"
+        return {"MSFT": list(range(100)), "NVDA": [1, 2]}
+
     def spy_closes(self, start):
         assert start == "2026-01-02"
         return {"2026-01-02": 500.0, "2026-01-06": 550.0}
@@ -77,6 +81,8 @@ def test_build():
     # Jan 20 is not the month's last trading day -> stop; none of these sells are month-end
     assert doc["trades"][0]["reason"] == "20% stop-loss"
     assert doc["next_run"] == "2026-01-30"
+    assert len(doc["spark"]["MSFT"]) == export.SPARK_DAYS and doc["spark"]["MSFT"][-1] == 99
+    assert doc["spark"]["NVDA"] == [1, 2]
     assert doc["pending"] == [{"symbol": "AMD", "side": "buy", "qty": 5, "type": "limit",
                                "limit": 150.5, "placed": "2026-01-22"}]
 
@@ -99,11 +105,13 @@ def test_missing_keys(tmp_path=None):
     for v in ("ALPACA_KEY_ID", "ALPACA_SECRET_KEY", "ALPACA_SWING_KEY_ID", "ALPACA_SWING_SECRET_KEY"):
         os.environ.pop(v, None)
     sys.argv = ["export.py", "--out", str(out)]
+    export.usd_dkk = lambda: (6.5, "2026-01-22")  # no network in tests
     export.main()
     for name in ("monthly", "swing"):
         with open(os.path.join(out, f"{name}.json")) as f:
             doc = json.load(f)
         assert doc["status"] == "not_connected"
+        assert doc["usd_dkk"] == 6.5 and doc["fx_date"] == "2026-01-22"
 
 
 def test_read_only():
