@@ -31,32 +31,77 @@ def month_ends(index):
 
 
 def simulate(prices, spy, sectors=None, top_n=10, keep_rank=30,
-             max_per_sector=3, stop_loss=0.20, use_brake=True):
-    """Daily simulation with monthly decisions on the last trading day."""
+             max_per_sector=3, stop_loss=0.20, use_brake=True,
+             trend_exit=None, daily_brake=False, daily_refill=False):
+    """Daily simulation with monthly decisions on the last trading day.
+
+    The defaults are the current monthly robot. The daily-trend options:
+      trend_exit=200    sell a holding the day it closes below its own N-day
+                        average, instead of waiting for month end
+      daily_brake=True  sell everything the day SPY closes below its 200-day
+                        average (normally checked at month end only)
+      daily_refill=True fill empty slots every day from the ranking (and buy
+                        back the day SPY recovers) instead of at month end
+    """
     cost = RULES["cost_per_trade"]
     prices = prices.ffill()  # carry the last price over gaps so sales never see NaN
     sma, mom = indicators(prices)
+    exit_sma = prices.rolling(trend_exit, min_periods=trend_exit).mean() if trend_exit else None
     spy_sma = spy.rolling(RULES["sma_days"]).mean()
     rebal = month_ends(prices.index)
 
     cash, shares, entry = 1.0, {}, {}
-    equity, trades, traded_value = [], 0, 0.0
+    cost_basis, entry_day = {}, {}
+    equity, trades, traded_value = [], 0, 0.0  # traded_value: sum of trade size / account value
+    value = 1.0
+    closed = []  # (return incl. costs, trading days held) per round trip
 
-    for day in prices.index:
+    def sell(t, price, day_i):
+        nonlocal cash, traded_value, trades
+        proceeds = shares.pop(t) * price
+        entry.pop(t)
+        cash += proceeds * (1 - cost)
+        traded_value += proceeds / value
+        trades += 1
+        closed.append((proceeds * (1 - cost) / cost_basis.pop(t) - 1, day_i - entry_day.pop(t)))
+
+    def buy(new, close, day_i):
+        nonlocal cash, traded_value, trades, value
+        # Equal 1/top_n slice of the account (rule 8).
+        value = cash + sum(n * close[t] for t, n in shares.items())
+        for t in new:
+            spend = min(value / top_n, cash / max(len(new), 1) if cash > 0 else 0)
+            if spend <= 0 or np.isnan(close[t]):
+                continue
+            shares[t] = spend * (1 - cost) / close[t]
+            entry[t] = close[t]
+            cost_basis[t] = spend
+            entry_day[t] = day_i
+            cash -= spend
+            traded_value += spend / value
+            trades += 1
+
+    for day_i, day in enumerate(prices.index):
         close = prices.loc[day]
         value = cash + sum(n * close[t] for t, n in shares.items() if not np.isnan(close[t]))
+        spy_ok = not np.isnan(spy_sma.get(day, np.nan))
+        brake_on = use_brake and spy_ok and spy[day] < spy_sma[day]
 
         # Rule 12: emergency stop, checked every day.
         for t in list(shares):
             if stop_loss and close[t] <= entry[t] * (1 - stop_loss):
-                proceeds = shares.pop(t) * close[t]
-                entry.pop(t)
-                cash += proceeds * (1 - cost)
-                traded_value += proceeds
-                trades += 1
+                sell(t, close[t], day_i)
 
-        if day in rebal and not np.isnan(spy_sma.get(day, np.nan)):
-            brake_on = use_brake and spy[day] < spy_sma[day]
+        # Daily trend exits: the stock's own trend, then the whole market.
+        if trend_exit:
+            for t in list(shares):
+                if close[t] < exit_sma.at[day, t]:
+                    sell(t, close[t], day_i)
+        if daily_brake and brake_on:
+            for t in list(shares):
+                sell(t, close[t], day_i)
+
+        if day in rebal and spy_ok:
             if brake_on:
                 targets = []
             else:
@@ -65,31 +110,28 @@ def simulate(prices, spy, sectors=None, top_n=10, keep_rank=30,
                                          sectors, top_n, keep_rank, max_per_sector)
             # Sell what is no longer wanted (rules 10, 11).
             for t in [t for t in shares if t not in targets]:
-                proceeds = shares.pop(t) * close[t]
-                entry.pop(t)
-                cash += proceeds * (1 - cost)
-                traded_value += proceeds
-                trades += 1
-            # Buy new names at an equal 1/top_n slice of the account (rule 8).
-            value = cash + sum(n * close[t] for t, n in shares.items())
-            new = [t for t in targets if t not in shares]
-            for t in new:
-                spend = min(value / top_n, cash / max(len(new), 1) if cash > 0 else 0)
-                if spend <= 0 or np.isnan(close[t]):
-                    continue
-                shares[t] = spend * (1 - cost) / close[t]
-                entry[t] = close[t]
-                cash -= spend
-                traded_value += spend
-                trades += 1
-            new.clear()
+                sell(t, close[t], day_i)
+            buy([t for t in targets if t not in shares], close, day_i)
+        elif daily_refill and spy_ok and not brake_on and len(shares) < top_n:
+            ranked = rank_candidates(close, sma.loc[day], mom.loc[day])
+            targets = pick_portfolio(list(shares), ranked, close, sma.loc[day],
+                                     sectors, top_n, keep_rank, max_per_sector)
+            buy([t for t in targets if t not in shares][:top_n - len(shares)], close, day_i)
 
         value = cash + sum(n * close[t] for t, n in shares.items() if not np.isnan(close[t]))
         equity.append(value)
 
     curve = pd.Series(equity, index=prices.index)
     years = len(curve) / 252
-    return curve, {"trades": trades, "turnover_per_year": traded_value / years}
+    rets = np.array([r for r, _ in closed]) if closed else np.array([np.nan])
+    return curve, {
+        "trades": trades,
+        "turnover_per_year": traded_value / years,
+        "round_trips": len(closed),
+        "win_rate": float(np.mean(rets > 0)) if closed else np.nan,
+        "avg_trade": float(np.mean(rets)) if closed else np.nan,
+        "avg_days_held": float(np.mean([d for _, d in closed])) if closed else np.nan,
+    }
 
 
 def stats(curve):
@@ -111,16 +153,21 @@ def stats(curve):
     }, yearly
 
 
-def run(start, out_dir, synthetic=False):
+def load_data(start, synthetic=False):
+    """Stock and sector-ETF closes from 14 months before start (indicator warm-up)."""
     warmup_start = (pd.Timestamp(start) - pd.DateOffset(years=1, months=2)).strftime("%Y-%m-%d")
     if synthetic:
-        stocks, etfs, spy, sectors = synthetic_data(warmup_start)
-    else:
-        sectors = sp500_constituents()
-        print(f"Downloading {len(sectors)} S&P 500 stocks + ETFs from {warmup_start}...")
-        stocks = download_prices(sectors.keys(), warmup_start)
-        etfs = download_prices(SECTOR_ETFS + ["SPY"], warmup_start)
-        spy = etfs.pop("SPY")
+        return synthetic_data(warmup_start)
+    sectors = sp500_constituents()
+    print(f"Downloading {len(sectors)} S&P 500 stocks + ETFs from {warmup_start}...")
+    stocks = download_prices(sectors.keys(), warmup_start)
+    etfs = download_prices(SECTOR_ETFS + ["SPY"], warmup_start)
+    spy = etfs.pop("SPY")
+    return stocks, etfs, spy, sectors
+
+
+def run(start, out_dir, synthetic=False):
+    stocks, etfs, spy, sectors = load_data(start, synthetic)
 
     def trim(x):
         return x.loc[start:]
