@@ -26,6 +26,7 @@ jobs:
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       SWING_CAPITAL: ${{ vars.SWING_CAPITAL }}
+      SWING_ENTRY: ${{ vars.SWING_ENTRY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -2,7 +2,7 @@
 
 A second, shorter-term robot next to the monthly Quality Momentum robot. It trades a **separate Alpaca paper account**, so it can never touch the monthly robot's positions. There is no live-money switch.
 
-The research behind it, and the backtest results, are in the project file `research/swing-sleeve.md`.
+The research behind it, and the backtest results, are in the project file `research/swing-sleeve.md`. Backtest 2010–2026 in short: about +2.6% per trade on average (40% winners averaging +15%, losers averaging −5.6%). The trailing stop carries the profit. Waiting for the dip did not improve timing. All results are flattered by using today's S&P 500 members.
 
 ## The rules (checked every weekday after the US close)
 
@@ -65,7 +65,9 @@ X/Twitter is not included: its API is paid. The FT feed is headlines only.
    - `ALPACA_SWING_KEY_ID` and `ALPACA_SWING_SECRET_KEY`: the second account's keys
    - `ANTHROPIC_API_KEY`: optional, turns on the news layer (costs cents a day)
    - `NTFY_TOPIC` is shared with the monthly robot
-3. Optional variable `SWING_CAPITAL`, e.g. `2000`. The robot then sizes as if the sleeve were $2,000, giving about $200 positions, even though the paper account holds $100,000.
+3. Optional variables:
+   - `SWING_CAPITAL`, e.g. `2000`. The robot then sizes as if the sleeve were $2,000, giving about $200 positions, even though the paper account holds $100,000.
+   - `SWING_ENTRY=trend` buys strong bull-trend stocks without waiting for a dip. In the backtest this did better than waiting for the dip; the default (`dip`) is the design you asked for.
 4. Run *Actions → Swing sleeve robot (paper) → Run workflow* with "Preview only" ticked to see what it would do today.
 
 Until the secrets exist, the daily run just skips. The schedule only runs once this folder is on the repository's default branch.

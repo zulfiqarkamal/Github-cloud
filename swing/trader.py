@@ -16,6 +16,7 @@ Settings (GitHub secrets / variables):
   ALPACA_SWING_KEY_ID, ALPACA_SWING_SECRET_KEY   keys of the second paper account
   NTFY_TOPIC                                     phone alerts (same as the monthly robot)
   SWING_CAPITAL                                  dollars the sleeve may use (default: whole account)
+  SWING_ENTRY                                    "dip" (default) or "trend" (no dip needed)
   ANTHROPIC_API_KEY                              optional, turns on the news layer
 
     python trader.py --dry-run     # decide and notify, place no orders
@@ -38,9 +39,10 @@ from rules import (BULL, RULES, STATE_NAME, download_ohlcv, entry_signals,  # no
 DATA_URL = "https://data.alpaca.markets"
 TITLE = "Swing sleeve"
 
-# Backtest result per trade, filled in from swing/backtest.py (see README).
-# Shown in alerts as "what to expect", already cut in half as a safety margin.
-BACKTEST_AVG_TRADE = None
+# Average result per trade of the dip + trailing-stop rules, 2010-2026 backtest
+# (swing/backtest.py, run 2026-10-09). Alerts show HALF of it as a safety margin,
+# because the backtest is flattered by survivorship bias and edges fade once known.
+BACKTEST_AVG_TRADE = 0.026
 
 
 def notify(lines, title=TITLE):
@@ -91,7 +93,9 @@ def plan(held, entries, px, spy, sleeve_equity, cash, vetoes=None):
     vetoes = vetoes or {}
     ind = indicators(px, spy)
     state = trend_state(ind)
-    sig = entry_signals(ind, state)
+    # SWING_ENTRY=trend buys strong bull-trend stocks without waiting for a dip
+    # (did better in the backtest); the default waits for a dip as designed.
+    sig = entry_signals(ind, state, rsi_max=101.0 if os.environ.get("SWING_ENTRY") == "trend" else None)
     last = ind["close"].index[-1]
     c, atr = ind["close"].iloc[-1], ind["atr"].iloc[-1]
     notes, sells, buys = [], [], []

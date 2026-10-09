@@ -55,6 +55,16 @@ def test_dip_in_strong_stock_is_bought():
     assert "first stop" in info
 
 
+def test_trend_entry_mode_buys_without_dip():
+    px = make_px({"STRONG": uptrend(start=30)})
+    assert trader.plan({}, {}, px, spy_up(), 2000, 2000)[1] == []
+    os.environ["SWING_ENTRY"] = "trend"
+    try:
+        assert [b[0] for b in trader.plan({}, {}, px, spy_up(), 2000, 2000)[1]] == ["STRONG"]
+    finally:
+        os.environ.pop("SWING_ENTRY")
+
+
 def test_no_buys_when_spy_below_200_day():
     spy = pd.Series(uptrend(daily=-0.002, start=500), index=DAYS)
     px = make_px({"DIP": with_dip(uptrend())})
