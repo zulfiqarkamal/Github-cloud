@@ -5,13 +5,15 @@ Every number lives in RULES so the backtest and the paper robot stay in sync.
 Prices come as a dict of DataFrames {"open", "high", "low", "close", "volume"},
 one column per ticker.
 """
+import os
+
 import numpy as np
 import pandas as pd
 
 RULES = {
     # Universe
     "min_price": 10.0,            # skip penny-ish stocks
-    "max_price": 100.0,           # your preference; makes whole-share $200 positions possible
+    "max_price": float(os.environ.get("SWING_MAX_PRICE", 100.0)),  # your preference; the backtest used $100
     "min_dollar_volume": 20e6,    # average daily trading at least $20m (easy to get in and out)
     # Trend state
     "sma_fast": 50,

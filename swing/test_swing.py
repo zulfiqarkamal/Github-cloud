@@ -178,8 +178,8 @@ def test_news_validate_signs_returns(tmp_path=None):
 
 
 class FakeBroker:
-    def __init__(self):
-        self.orders, self.cancelled = [], False
+    def __init__(self, frac=False):
+        self.orders, self.cancelled, self.frac = [], False, frac
 
     def is_trading_day(self, d):
         return True
@@ -199,6 +199,9 @@ class FakeBroker:
     def cancel_open_orders(self):
         self.cancelled = True
 
+    def fractionable(self, t):
+        return self.frac
+
     def limit_order(self, t, qty, side, limit):
         self.orders.append((t, qty, side, round(limit, 2)))
 
@@ -213,6 +216,39 @@ def test_run_places_extended_hours_limit_orders():
     assert b.cancelled and len(b.orders) == 1 and b.orders[0][2] == "buy"
     assert b.orders[0][1] * b.orders[0][3] <= 200 + 1e-6   # 10% of a $2,000 sleeve
     os.environ.pop("SWING_CAPITAL")
+
+
+def test_fractional_shares_when_allowed():
+    os.environ["SWING_CAPITAL"] = "2000"
+    px = make_px({"DIP": with_dip(uptrend())})
+    whole, frac = FakeBroker(), FakeBroker(frac=True)
+    trader.run(whole, date(2025, 3, 3), data=(px, spy_up()))
+    trader.run(frac, date(2025, 3, 3), data=(px, spy_up()))
+    os.environ.pop("SWING_CAPITAL")
+    w, f = whole.orders[0][1], frac.orders[0][1]
+    assert w == int(w) and f != int(f) and f > w             # fractions use the full slot
+    assert f * frac.orders[0][3] <= 200 + 1e-6
+    assert f == round(f, 4)
+
+
+def test_fractional_extended_hours_fallback():
+    calls = []
+
+    class B(trader.SwingAlpaca):
+        def __init__(self):
+            pass
+
+        def _req(self, method, path, **kw):
+            calls.append(kw["json"])
+            if kw["json"]["extended_hours"] and "." in kw["json"]["qty"]:
+                raise RuntimeError("Alpaca POST /v2/orders failed: 422 fractional orders not allowed")
+            return {"id": "1"}
+
+    B().limit_order("LLY", 0.2531, "buy", 812.0)
+    assert [c["extended_hours"] for c in calls] == [True, False] and calls[1]["qty"] == "0.2531"
+    calls.clear()
+    B().limit_order("KO", 3, "buy", 60.0)
+    assert len(calls) == 1 and calls[0]["qty"] == "3" and calls[0]["extended_hours"]
 
 
 def test_same_account_guard():

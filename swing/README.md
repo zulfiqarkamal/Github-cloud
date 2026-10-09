@@ -45,6 +45,8 @@ The robot runs at 21:45 UTC, which is inside the US after-hours session. It send
 - buys: limit 0.5% above the last close
 - sells: limit 1% below the last close
 
+The robot buys **fractional shares** (rounded down to 4 decimals) when Alpaca allows it for that stock, otherwise whole shares. If Alpaca refuses a fractional order outside regular hours, the robot resends it for the next regular session.
+
 Unfilled orders are cancelled at the next run and re-decided. Spreads are wider and volume is thin outside regular hours, so fills can be worse than in the backtest.
 
 ## News layer (optional)
@@ -67,6 +69,7 @@ X/Twitter is not included: its API is paid. The FT feed is headlines only.
    - `NTFY_TOPIC` is shared with the monthly robot
 3. Optional variables:
    - `SWING_CAPITAL`, e.g. `2000`. The robot then sizes as if the sleeve were $2,000, giving about $200 positions, even though the paper account holds $100,000.
+   - `SWING_MAX_PRICE`, e.g. `1000`, to allow pricier stocks such as LLY. The default of $100 is what the backtest used.
    - `SWING_ENTRY=trend` buys strong bull-trend stocks without waiting for a dip. In the backtest this did better than waiting for the dip; the default (`dip`) is the design you asked for.
 4. Run *Actions → Swing sleeve robot (paper) → Run workflow* with "Preview only" ticked to see what it would do today.
 

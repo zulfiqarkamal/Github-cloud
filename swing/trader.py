@@ -17,6 +17,9 @@ Settings (GitHub secrets / variables):
   NTFY_TOPIC                                     phone alerts (same as the monthly robot)
   SWING_CAPITAL                                  dollars the sleeve may use (default: whole account)
   SWING_ENTRY                                    "dip" (default) or "trend" (no dip needed)
+  SWING_MAX_PRICE                                highest share price to buy (default 100)
+
+Buys fractional shares when Alpaca allows it for that stock, otherwise whole shares.
   ANTHROPIC_API_KEY                              optional, turns on the news layer
 
     python trader.py --dry-run     # decide and notify, place no orders
@@ -49,17 +52,44 @@ def notify(lines, title=TITLE):
     _notify(lines, title)
 
 
+def fmt_qty(qty):
+    """Whole shares as "3", fractions as Alpaca's up-to-9-decimal string ("0.2531")."""
+    return str(int(qty)) if qty == int(qty) else f"{qty:.9f}".rstrip("0")
+
+
+def share_qty(amount, price, fractional):
+    """Shares to buy for a dollar amount: rounded down to 4 decimals when the
+    stock can be bought in fractions, otherwise whole shares."""
+    if fractional:
+        return np.floor(amount / price * 1e4) / 1e4
+    return float(int(amount // price))
+
+
 class SwingAlpaca(Alpaca):
     def cancel_open_orders(self):
         return self._req("DELETE", "/v2/orders")
 
+    def fractionable(self, ticker):
+        try:
+            return bool(self._req("GET", f"/v2/assets/{ticker.replace('-', '.')}").get("fractionable"))
+        except RuntimeError:
+            return False
+
     def limit_order(self, ticker, qty, side, limit):
-        """Extended-hours eligible day limit order (Alpaca only allows limit
-        orders outside regular hours)."""
-        return self._req("POST", "/v2/orders", json={
-            "symbol": ticker.replace("-", "."), "qty": str(int(qty)), "side": side,
-            "type": "limit", "limit_price": f"{limit:.2f}", "time_in_force": "day",
-            "extended_hours": True})
+        """Day limit order, extended-hours eligible where Alpaca allows it.
+        Alpaca only accepts limit orders outside regular hours, and may refuse
+        extended hours for fractional quantities; a refused order is never
+        created, so it is resent for the next regular session instead."""
+        order = {"symbol": ticker.replace("-", "."), "qty": fmt_qty(qty), "side": side,
+                 "type": "limit", "limit_price": f"{limit:.2f}", "time_in_force": "day",
+                 "extended_hours": True}
+        try:
+            return self._req("POST", "/v2/orders", json=order)
+        except RuntimeError as e:
+            if qty == int(qty) or " 4" not in str(e):
+                raise
+            print(f"({ticker}: fractional extended-hours order refused, using the next regular session)")
+            return self._req("POST", "/v2/orders", json={**order, "extended_hours": False})
 
     def entry_dates(self):
         """{ticker: date of the most recent filled buy}"""
@@ -86,11 +116,12 @@ class SwingAlpaca(Alpaca):
             return {}
 
 
-def plan(held, entries, px, spy, sleeve_equity, cash, vetoes=None):
+def plan(held, entries, px, spy, sleeve_equity, cash, vetoes=None, fractionable=None):
     """Pure decision step (no broker calls), so it can be tested offline.
     held: {ticker: {"qty", "entry"}}, entries: {ticker: entry date}
     Returns (sells, buys, notes): sells [(ticker, qty, limit, why)], buys [(ticker, qty, limit, info)]"""
     vetoes = vetoes or {}
+    fractionable = fractionable or (lambda t: False)
     ind = indicators(px, spy)
     state = trend_state(ind)
     # SWING_ENTRY=trend buys strong bull-trend stocks without waiting for a dip
@@ -135,9 +166,9 @@ def plan(held, entries, px, spy, sleeve_equity, cash, vetoes=None):
             continue
         limit = c[t] * (1 + RULES["entry_limit_buffer"])
         amount = min(position_size(sleeve_equity, c[t], atr[t]), cash)
-        qty = int(amount // limit)
-        if qty < 1:
-            notes.append(f"Skipped {t}: not enough cash for one share.")
+        qty = share_qty(amount, limit, fractionable(t))
+        if qty * limit < 1:   # Alpaca's minimum order is $1
+            notes.append(f"Skipped {t}: not enough cash to buy.")
             continue
         stop = c[t] - RULES["stop_atr"] * atr[t]
         risk = qty * (limit - stop)
@@ -188,20 +219,21 @@ def run(broker, today, dry_run=False, data=None, news_fn=None):
         watch = sorted(set(held) | {b[0] for b in pre_buys})
         vetoes, news_alerts = news_fn(watch, set(c.columns), rets, atr_pct)
 
-    sells, buys, notes = plan(held, broker.entry_dates(), px, spy, sleeve, cash, vetoes)
+    sells, buys, notes = plan(held, broker.entry_dates(), px, spy, sleeve, cash, vetoes,
+                              fractionable=broker.fractionable)
     quotes = broker.iex_quotes([b[0] for b in buys])
 
     if not dry_run:
         broker.cancel_open_orders()
     actions = []
     for t, qty, limit, why in sells:
-        actions.append(f"SELL {qty:g} {t} limit {limit:.2f} ({why})")
+        actions.append(f"SELL {fmt_qty(qty)} {t} limit {limit:.2f} ({why})")
         if not dry_run:
             broker.limit_order(t, qty, "sell", limit)
     for t, qty, limit, info in buys:
         q = quotes.get(t)
         book = f"; IEX quote bid size {q.get('bs')} / ask size {q.get('as')}" if q else ""
-        actions.append(f"BUY {qty} {t} limit {limit:.2f} (~${qty * limit:,.0f}) - {info}{book}")
+        actions.append(f"BUY {fmt_qty(qty)} {t} limit {limit:.2f} (~${qty * limit:,.0f}) - {info}{book}")
         if not dry_run:
             broker.limit_order(t, qty, "buy", limit)
 
