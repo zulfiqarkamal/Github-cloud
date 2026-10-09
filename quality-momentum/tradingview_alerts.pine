@@ -1,0 +1,31 @@
+//@version=5
+// Quality Momentum helper for TradingView.
+// Add to a SPY chart for the crash-brake alert, or to a stock you hold
+// (enter your purchase price) for the exit and 20% stop alerts.
+// Alerts can go to email/app, or by webhook to n8n or SignalStack (IBKR paper).
+indicator("Quality Momentum alerts", overlay=true)
+
+entryPrice = input.float(0.0, "Your entry price (0 = not held)", minval=0)
+stopPct    = input.float(20.0, "Stop loss %", minval=1, maxval=50)
+
+sma200 = ta.sma(close, 200)
+mom121 = close[21] / close[252] - 1       // 12-month return excluding the last month
+stopLevel = entryPrice > 0 ? entryPrice * (1 - stopPct / 100) : na
+
+plot(sma200, "200-day average", color=color.orange, linewidth=2)
+plot(stopLevel, "Stop", color=color.red, style=plot.style_linebr)
+bgcolor(close < sma200 ? color.new(color.red, 90) : na, title="Below 200-day")
+
+var table info = table.new(position.top_right, 1, 2)
+if barstate.islast
+    table.cell(info, 0, 0, "12-1 momentum: " + str.tostring(mom121 * 100, "#.0") + "%")
+    table.cell(info, 0, 1, close > sma200 ? "Above 200-day" : "BELOW 200-day")
+
+// Rule 10 (on SPY): crash brake on / off.
+alertcondition(ta.crossunder(close, sma200), "Closed below 200-day",
+     '{"rule":"below_200d","ticker":"{{ticker}}","close":{{close}}}')
+alertcondition(ta.crossover(close, sma200), "Closed above 200-day",
+     '{"rule":"above_200d","ticker":"{{ticker}}","close":{{close}}}')
+// Rule 12: emergency stop on a holding.
+alertcondition(entryPrice > 0 and close <= stopLevel, "Stop hit (20% below entry)",
+     '{"rule":"stop","ticker":"{{ticker}}","close":{{close}}}')
