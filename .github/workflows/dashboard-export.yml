@@ -1,0 +1,45 @@
+name: Dashboard export (read-only)
+
+on:
+  schedule:
+    - cron: "5 22 * * 1-5"   # 22:05 UTC weekdays, after both robots have run
+  workflow_dispatch:
+
+concurrency: dashboard-export
+
+permissions:
+  contents: write   # to save the results on the dashboard-data branch
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "requests>=2.31"
+      - name: Export both paper accounts
+        env:
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_SWING_KEY_ID: ${{ secrets.ALPACA_SWING_KEY_ID }}
+          ALPACA_SWING_SECRET_KEY: ${{ secrets.ALPACA_SWING_SECRET_KEY }}
+        run: python dashboard/export.py --out "$RUNNER_TEMP/dash"
+      - name: Save on the dashboard-data branch
+        if: always()
+        run: |
+          ls "$RUNNER_TEMP/dash"/*.json >/dev/null 2>&1 || exit 0
+          git config user.name "dashboard-robot"
+          git config user.email "dashboard-robot@users.noreply.github.com"
+          if git fetch origin dashboard-data; then
+            git checkout -B dashboard-data origin/dashboard-data
+          else
+            git checkout --orphan dashboard-data && git rm -rfq .
+          fi
+          cp "$RUNNER_TEMP/dash"/*.json .
+          git add ./*.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Dashboard export $(date -u +%F)"
+          git push origin dashboard-data

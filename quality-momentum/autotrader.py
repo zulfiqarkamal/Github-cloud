@@ -18,6 +18,7 @@ Settings come from environment variables (GitHub secrets):
     python autotrader.py --force-monthly --dry-run   # preview this month's rebalance today
 """
 import argparse
+import math
 import os
 import sys
 from datetime import date
@@ -71,9 +72,12 @@ class Alpaca:
     def sell_all(self, ticker):
         return self._req("DELETE", f"/v2/positions/{ticker.replace('-', '.')}")
 
+    def fractionable(self, ticker):
+        return bool(self._req("GET", f"/v2/assets/{ticker.replace('-', '.')}").get("fractionable"))
+
     def buy(self, ticker, qty):
         return self._req("POST", "/v2/orders", json={
-            "symbol": ticker.replace("-", "."), "qty": str(int(qty)), "side": "buy",
+            "symbol": ticker.replace("-", "."), "qty": f"{qty:g}", "side": "buy",
             "type": "market", "time_in_force": "day"})
 
 
@@ -171,12 +175,14 @@ def run(broker, today, dry_run=False, force_monthly=False, fraction=1.0, data=No
             h["qty"] * float(close.get(t, 0)) for t, h in held.items() if t not in to_sell))
         for t in [t for t in targets if t not in held and t not in pending]:
             price = float(close[t])
-            qty = int(min(slot, budget) // price)
+            # Fractional shares where the broker allows them, so pricey stocks fit a small account.
+            spend = min(slot, budget)
+            qty = math.floor(spend / price * 1e4) / 1e4 if broker.fractionable(t) else int(spend // price)
             if qty * price < slot / 2:  # skip leftover crumbs smaller than half a slot
                 notes.append(f"Not enough cash left to buy {t}.")
                 continue
             budget -= qty * price
-            actions.append(f"BUY {qty} {t} (~${qty * price:,.0f}, {sectors.get(t, '')})")
+            actions.append(f"BUY {qty:g} {t} (~${qty * price:,.0f}, {sectors.get(t, '')})")
             if not dry_run:
                 broker.buy(t, qty)
 
