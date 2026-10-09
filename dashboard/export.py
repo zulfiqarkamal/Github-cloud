@@ -15,7 +15,7 @@ import argparse
 import json
 import os
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -62,6 +62,13 @@ class ReadOnlyAlpaca:
             if len(page) < 500:
                 return out
             after = page[-1]["submitted_at"]
+
+    def open_orders(self):
+        """Orders placed but not filled yet (the robots trade after the close)."""
+        return self.get(PAPER_URL + "/v2/orders", status="open", limit=500, direction="asc")
+
+    def trading_days(self, start, end):
+        return [d["date"] for d in self.get(PAPER_URL + "/v2/calendar", start=start, end=end)]
 
     def spy_closes(self, start):
         """{YYYY-MM-DD: close} for SPY from the free IEX feed (benchmark only)."""
@@ -111,6 +118,7 @@ def closed_trades(orders):
     for o in orders:
         sym, qty, px = o["symbol"], float(o["filled_qty"]), float(o["filled_avg_price"])
         when = o["filled_at"][:10]
+        decided = (o.get("submitted_at") or o["filled_at"])[:10]
         if o["side"] == "buy":
             lots[sym].append([qty, px, when])
             continue
@@ -132,8 +140,34 @@ def closed_trades(orders):
         days = (datetime.fromisoformat(when) - datetime.fromisoformat(opened)).days
         trades.append({"symbol": sym, "qty": _f(matched, 4), "entry": _f(entry), "exit": _f(px),
                        "pnl": _f(pnl), "pct": _f((px / entry - 1) * 100), "opened": opened,
-                       "closed": when, "days": days})
+                       "closed": when, "decided": decided, "days": days})
     return trades
+
+
+def month_ends(days):
+    """Last trading day of each month in a sorted list of YYYY-MM-DD days."""
+    ends = {}
+    for d in days:
+        ends[d[:7]] = d
+    return ends
+
+
+def exit_reason(robot, trade, ends, buy_days):
+    """Why a position was sold, worked out from the robot's fixed rules (the
+    broker does not record reasons). The robots decide after the close, so we
+    use the day the sell order was placed, not the day it filled."""
+    d = trade["decided"]
+    if robot == "monthly":
+        if ends.get(d[:7]) == d:
+            if d not in buy_days:
+                return "Crash brake: market fell below its 200-day average"
+            return "Monthly rotation: dropped out of the top 30 or below its 200-day average"
+        return "20% stop-loss"
+    if trade["pnl"] > 0:
+        return "Trailing stop: profit locked in"
+    if trade["days"] >= 84:  # about 60 trading days
+        return "Time stop: no progress after 60 trading days"
+    return "Stop: first stop, trailing stop or trend break"
 
 
 def trade_stats(trades):
@@ -165,6 +199,18 @@ def build(name, label, broker, now):
     equity, last_equity = float(acct["equity"]), float(acct["last_equity"])
     start_equity = curve[0]["equity"] if curve else equity
     trades = closed_trades(orders)
+    today = now[:10]
+    horizon = (datetime.fromisoformat(today) + timedelta(days=45)).strftime("%Y-%m-%d")
+    days = broker.trading_days(start, horizon)
+    ends = month_ends(days)
+    buy_days = {(o.get("submitted_at") or o["filled_at"])[:10] for o in orders if o["side"] == "buy"}
+    for t in trades:
+        t["reason"] = exit_reason(name, t, ends, buy_days)
+    next_run = next((d for d in sorted(ends.values()) if d >= today), None) if name == "monthly" \
+        else next((d for d in days if d >= today), None)
+    pending = [{"symbol": o["symbol"], "side": o["side"], "qty": _f(o.get("qty") or 0, 4),
+                "type": o.get("type"), "limit": _f(o.get("limit_price")),
+                "placed": (o.get("submitted_at") or "")[:10]} for o in broker.open_orders()]
     opened_on = {}
     for o in orders:
         if o["side"] == "buy":
@@ -195,8 +241,8 @@ def build(name, label, broker, now):
                  "qty": _f(o["filled_qty"], 4), "price": _f(o["filled_avg_price"])}
                 for o in orders[-40:]][::-1]
     return {"robot": name, "label": label, "status": "live", "sample": False, "updated_at": now,
-            "metrics": metrics, "curve": curve, "positions": pos,
-            "trades": trades[-100:][::-1], "activity": activity}
+            "metrics": metrics, "curve": curve, "positions": pos, "pending": pending,
+            "next_run": next_run, "trades": trades[-200:][::-1], "activity": activity}
 
 
 def main():

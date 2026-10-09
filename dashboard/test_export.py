@@ -44,6 +44,14 @@ class FakeBroker:
         return {"timestamp": [ts("2025-12-31"), ts("2026-01-02"), ts("2026-01-05"), ts("2026-01-06")],
                 "equity": [0, 10000, 11000, 9900]}
 
+    def open_orders(self):
+        return [{"symbol": "AMD", "side": "buy", "qty": "5", "type": "limit", "limit_price": "150.5",
+                 "submitted_at": "2026-01-22T21:46:00Z"}]
+
+    def trading_days(self, start, end):
+        assert start == "2026-01-02" and end == "2026-03-08"
+        return ["2026-01-02", "2026-01-12", "2026-01-20", "2026-01-30", "2026-02-27", "2026-03-02"]
+
     def spy_closes(self, start):
         assert start == "2026-01-02"
         return {"2026-01-02": 500.0, "2026-01-06": 550.0}
@@ -66,6 +74,22 @@ def test_build():
     assert doc["trades"][1]["entry"] == round((1000 + 550) / 15, 2)
     assert doc["positions"][0]["symbol"] == "MSFT" and doc["positions"][0]["since"] == "2026-01-13"
     assert doc["activity"][0]["symbol"] == "XYZ"
+    # Jan 20 is not the month's last trading day -> stop; none of these sells are month-end
+    assert doc["trades"][0]["reason"] == "20% stop-loss"
+    assert doc["next_run"] == "2026-01-30"
+    assert doc["pending"] == [{"symbol": "AMD", "side": "buy", "qty": 5, "type": "limit",
+                               "limit": 150.5, "placed": "2026-01-22"}]
+
+
+def test_exit_reasons():
+    ends = export.month_ends(["2026-01-29", "2026-01-30", "2026-02-27"])
+    t = {"decided": "2026-01-30", "pnl": 10, "days": 30}
+    assert export.exit_reason("monthly", t, ends, {"2026-01-30"}).startswith("Monthly rotation")
+    assert export.exit_reason("monthly", t, ends, set()).startswith("Crash brake")
+    assert export.exit_reason("monthly", dict(t, decided="2026-01-29"), ends, set()) == "20% stop-loss"
+    assert export.exit_reason("swing", t, ends, set()).startswith("Trailing stop")
+    assert export.exit_reason("swing", dict(t, pnl=-5), ends, set()).startswith("Stop")
+    assert export.exit_reason("swing", dict(t, pnl=-5, days=90), ends, set()).startswith("Time stop")
 
 
 def test_missing_keys(tmp_path=None):
@@ -91,6 +115,7 @@ def test_read_only():
 
 if __name__ == "__main__":
     test_build()
+    test_exit_reasons()
     test_missing_keys()
     test_read_only()
     print("all dashboard export tests passed")
