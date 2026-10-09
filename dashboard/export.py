@@ -82,7 +82,7 @@ class ReadOnlyAlpaca:
 
 
     def closes(self, symbols, start):
-        """{symbol: [daily closes]} from the free IEX feed, for the small price graphs."""
+        """{symbol: [[date, close], ...]} from the free IEX feed, for price graphs and trends."""
         out, token = {}, None
         if not symbols:
             return out
@@ -94,7 +94,7 @@ class ReadOnlyAlpaca:
                     params["page_token"] = token
                 page = self.get(DATA_URL + "/v2/stocks/bars", **params)
                 for sym, bars in (page.get("bars") or {}).items():
-                    out.setdefault(sym, []).extend(round(float(b["c"]), 2) for b in bars)
+                    out.setdefault(sym, []).extend([b["t"][:10], round(float(b["c"]), 2)] for b in bars)
                 token = page.get("next_page_token")
                 if not token:
                     return out
@@ -116,6 +116,31 @@ def usd_dkk():
 
 
 SPARK_DAYS = 63  # about three months of trading days
+TREND_LOOKBACK_DAYS = 300  # calendar days, enough for a 200-day average
+
+
+def trend(values):
+    """Plain trend label from closes (oldest first), using the 50- and 200-day averages.
+
+    up:         above both averages (bull)
+    dip:        above the 200-day but below the 50-day (pullback in an uptrend)
+    recovering: above the 50-day but below the 200-day (climbing out of a bear trend)
+    down:       below both averages (bear)
+    """
+    if len(values) < 50:
+        return None
+    px = values[-1]
+    a50 = sum(values[-50:]) / 50
+    a200 = sum(values[-200:]) / 200 if len(values) >= 200 else None
+    above50 = px >= a50
+    if a200 is None:
+        label = "up" if above50 else "down"
+    elif px >= a200:
+        label = "up" if above50 else "dip"
+    else:
+        label = "recovering" if above50 else "down"
+    return {"t": label, "p50": _f((px / a50 - 1) * 100, 1),
+            "p200": _f((px / a200 - 1) * 100, 1) if a200 else None}
 
 
 def _f(x, nd=2):
@@ -248,9 +273,18 @@ def build(name, label, broker, now):
     pending = [{"symbol": o["symbol"], "side": o["side"], "qty": _f(o.get("qty") or 0, 4),
                 "type": o.get("type"), "limit": _f(o.get("limit_price")),
                 "placed": (o.get("submitted_at") or "")[:10]} for o in broker.open_orders()]
-    spark_start = (datetime.fromisoformat(today) - timedelta(days=100)).strftime("%Y-%m-%d")
-    spark = {k: v[-SPARK_DAYS:] for k, v in broker.closes(
-        {p["symbol"] for p in positions} | {o["symbol"] for o in pending}, spark_start).items()}
+    recent = trades[-200:]
+    watched = {p["symbol"] for p in positions} | {o["symbol"] for o in pending}
+    first = min([today] + [t["opened"] for t in recent])
+    bars = broker.closes(watched | {t["symbol"] for t in recent},
+                         (datetime.fromisoformat(first) - timedelta(days=TREND_LOOKBACK_DAYS)).strftime("%Y-%m-%d"))
+    spark = {k: [c for _, c in bars[k][-SPARK_DAYS:]] for k in watched if bars.get(k)}
+    trends = {k: trend([c for _, c in bars[k]]) for k in watched if bars.get(k)}
+    for t in recent:  # the trend the robot saw before it bought (no peeking at the entry day)
+        t["trend"] = trend([c for d, c in bars.get(t["symbol"], []) if d < t["opened"]])
+        t["news"] = None  # experimental tag, filled only if a news source is connected later
+    for o in pending:
+        o["trend"] = trends.get(o["symbol"])
     opened_on = {}
     for o in orders:
         if o["side"] == "buy":
@@ -261,7 +295,7 @@ def build(name, label, broker, now):
         "price": _f(p["current_price"]), "value": _f(p["market_value"]),
         "cost": _f(p["cost_basis"]), "pl": _f(p["unrealized_pl"]),
         "pct": _f(float(p["unrealized_plpc"]) * 100), "today_pct": _f(float(p["change_today"]) * 100),
-        "since": opened_on.get(p["symbol"])} for p in positions), key=lambda p: -(p["value"] or 0))
+        "since": opened_on.get(p["symbol"]), "trend": trends.get(p["symbol"])} for p in positions), key=lambda p: -(p["value"] or 0))
 
     spy_ret = (curve[-1]["spy"] / curve[0]["spy"] - 1) * 100 if curve and curve[-1].get("spy") and curve[0].get("spy") else None
     metrics = {
@@ -282,7 +316,7 @@ def build(name, label, broker, now):
                 for o in orders[-40:]][::-1]
     return {"robot": name, "label": label, "status": "live", "sample": False, "updated_at": now,
             "metrics": metrics, "curve": curve, "positions": pos, "pending": pending,
-            "next_run": next_run, "spark": spark, "trades": trades[-200:][::-1], "activity": activity}
+            "next_run": next_run, "spark": spark, "trades": recent[::-1], "activity": activity}
 
 
 def main():

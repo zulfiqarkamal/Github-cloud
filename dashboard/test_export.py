@@ -4,7 +4,7 @@
 """
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export  # noqa: E402
@@ -53,8 +53,11 @@ class FakeBroker:
         return ["2026-01-02", "2026-01-12", "2026-01-20", "2026-01-30", "2026-02-27", "2026-03-02"]
 
     def closes(self, symbols, start):
-        assert symbols == {"MSFT", "NVDA", "AMD"} and start == "2025-10-14"
-        return {"MSFT": list(range(100)), "NVDA": [1, 2]}
+        assert symbols == {"MSFT", "NVDA", "AMD", "AAPL"} and start == "2025-03-08"
+        day = lambda i: (datetime(2025, 3, 10) + timedelta(days=i)).strftime("%Y-%m-%d")
+        return {"MSFT": [[day(i), float(i + 1)] for i in range(100)], "NVDA": [[day(0), 1], [day(1), 2]],
+                # AAPL rises for 300 days: an uptrend when it was bought in Jan 2026
+                "AAPL": [[day(i), 100 + i] for i in range(300)]}
 
     def spy_closes(self, start):
         assert start == "2026-01-02"
@@ -81,8 +84,11 @@ def test_build():
     # Jan 20 is not the month's last trading day -> stop; none of these sells are month-end
     assert doc["trades"][0]["reason"] == "20% stop-loss"
     assert doc["next_run"] == "2026-01-30"
-    assert len(doc["spark"]["MSFT"]) == export.SPARK_DAYS and doc["spark"]["MSFT"][-1] == 99
+    assert len(doc["spark"]["MSFT"]) == export.SPARK_DAYS and doc["spark"]["MSFT"][-1] == 100
     assert doc["spark"]["NVDA"] == [1, 2]
+    assert doc["positions"][0]["trend"]["t"] == "up" and doc["positions"][1]["trend"] is None
+    assert doc["trades"][1]["trend"]["t"] == "up" and doc["trades"][1]["news"] is None
+    assert doc["pending"][0].pop("trend") is None
     assert doc["pending"] == [{"symbol": "AMD", "side": "buy", "qty": 5, "type": "limit",
                                "limit": 150.5, "placed": "2026-01-22"}]
 
@@ -96,6 +102,18 @@ def test_exit_reasons():
     assert export.exit_reason("swing", t, ends, set()).startswith("Trailing stop")
     assert export.exit_reason("swing", dict(t, pnl=-5), ends, set()).startswith("Stop")
     assert export.exit_reason("swing", dict(t, pnl=-5, days=90), ends, set()).startswith("Time stop")
+
+
+def test_trend():
+    up = [100 + i for i in range(250)]
+    assert export.trend(up)["t"] == "up"
+    assert export.trend(up[:-10] + [300] * 9 + [320])["t"] == "up"
+    assert export.trend(up + [330] * 30 + [300])["t"] == "dip"         # above 200-day, below 50-day
+    down = [400 - i for i in range(250)]
+    assert export.trend(down)["t"] == "down"
+    assert export.trend(down + [160] * 40 + [200])["t"] == "recovering"  # above 50-day, below 200-day
+    assert export.trend(up[:40]) is None
+    assert export.trend(up[:120])["p200"] is None
 
 
 def test_missing_keys(tmp_path=None):
@@ -124,6 +142,7 @@ def test_read_only():
 if __name__ == "__main__":
     test_build()
     test_exit_reasons()
+    test_trend()
     test_missing_keys()
     test_read_only()
     print("all dashboard export tests passed")
