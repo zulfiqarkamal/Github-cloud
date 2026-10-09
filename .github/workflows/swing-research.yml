@@ -1,0 +1,56 @@
+name: Swing sleeve research
+
+on:
+  push:
+    branches: [claude/project-thread-rahwsf]
+    paths: ["swing/**", ".github/workflows/swing-research.yml"]
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "What to run"
+        type: choice
+        options: [backtest, news-validate, feeds]
+        default: backtest
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: swing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: swing/requirements.txt
+      - run: pip install -r swing/requirements.txt
+      - name: Offline tests
+        run: python -m pytest test_swing.py -q
+      - name: Check news feeds are reachable
+        if: inputs.task == 'feeds' || github.event_name == 'push'
+        run: |
+          python - <<'PY'
+          import news
+          for name, url in {**news.GENERAL_FEEDS, "Yahoo:AAPL": news.TICKER_FEED.format("AAPL")}.items():
+              items = news.fetch_rss(url, name)
+              print(f"{name}: {len(items)} headlines", "|", items[0]["title"][:90] if items else "")
+          PY
+      - name: Backtest
+        if: inputs.task == 'backtest' || github.event_name == 'push'
+        run: python backtest.py
+      - name: Validate news scores
+        if: inputs.task == 'news-validate'
+        run: |
+          git show origin/swing-log:news_log.jsonl > news_log.jsonl
+          python news_validate.py news_log.jsonl | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: swing-results
+          path: swing/results/
+          if-no-files-found: ignore
