@@ -81,6 +81,22 @@ CSVs are written to `results/`.
 
 To check the code works without internet, run `python backtest.py --synthetic`. It uses random prices, so the numbers mean nothing.
 
+## Should it sell daily when a trend breaks? (tested: no)
+
+`python compare_exits.py` keeps the robot's buying exactly the same and only changes when it sells. Results, S&P 500 stocks, 2005 to Oct 2026, costs included:
+
+| Variant | CAGR | Max drawdown | Sharpe | Win rate | Trades/yr | Cost/yr |
+|---|---|---|---|---|---|---|
+| **A Monthly (current robot)** | **21.7%** | −40.2% | **0.94** | 52.7% | 47 | 0.3% |
+| B Sell the day a stock closes below its 200-day | 19.1% | −39.6% | 0.88 | 46.9% | 50 | 0.4% |
+| C Sell the day it closes below its 50-day | 10.5% | −17.7% | 0.78 | 41.4% | 127 | 0.9% |
+| D B + sell everything the day SPY breaks its 200-day | 17.1% | −39.7% | 0.83 | 46.1% | 57 | 0.4% |
+| E Fully daily (D + buy replacements daily) | 18.7% | −38.7% | 0.85 | 39.7% | 100 | 0.7% |
+
+The sector-ETF check (no survivorship bias) agrees: monthly 7.3% a year, daily 200-day exit 5.5%, fully daily 6.4%.
+
+Daily exits sell strong stocks on short dips that then recover, so the monthly robot stays as it is. The 50-day exit halves the worst drawdown but also halves the return.
+
 ## Step 2: monthly signals and paper trading
 
 ```bash
