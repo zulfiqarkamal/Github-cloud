@@ -3,4 +3,6 @@ numpy>=1.26
 yfinance>=0.2.40
 requests>=2.31
 lxml>=5.0
-ib_insync>=0.9.86  # only needed for --ibkr-paper
+beautifulsoup4>=4.12  # Finviz HTML parsing
+anthropic>=0.30       # AI reasoning layer (agent.py)
+ib_insync>=0.9.86     # only needed for --ibkr-paper

@@ -1,0 +1,51 @@
+name: Generative Trading Agent
+
+on:
+  schedule:
+    # Run weekdays at 22:00 UTC (after US market close)
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Place orders on Alpaca paper account"
+        required: false
+        default: "false"
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: quality-momentum
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt anthropic
+
+      - name: Run generative trading agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          LIVE_TRADING: ${{ secrets.LIVE_TRADING }}
+        run: |
+          if [ "${{ github.event.inputs.execute }}" = "true" ]; then
+            python agent.py --execute
+          else
+            python agent.py
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trading-report-${{ github.run_id }}
+          path: quality-momentum/report.json
+          retention-days: 90
