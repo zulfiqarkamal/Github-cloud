@@ -49,18 +49,22 @@ MAX_PER_SECTOR = 2
 # ── Finviz screener ───────────────────────────────────────────────────────────
 
 def fetch_finviz_top(n=TOP_N_SCREEN):
-    """Return top-n tickers (best 6-month perf) from the must-have Finviz screen."""
+    """Return top-n tickers (best 6-month perf) from the must-have Finviz screen.
+
+    Falls back to building the universe from the full S&P 500 via yfinance when
+    Finviz is unreachable (e.g. from GitHub Actions runners).
+    """
     headers = {"User-Agent": "Mozilla/5.0 (compatible; research-bot/1.0)"}
     tickers = []
     page = 1
+    finviz_ok = False
     while len(tickers) < n:
         url = FINVIZ_SCREEN + f"&r={(page - 1) * 20 + 1}"
         try:
             r = requests.get(url, headers=headers, timeout=20)
             r.raise_for_status()
+            finviz_ok = True
         except requests.RequestException:
-            # Fallback: try via Firecrawl proxy if direct is blocked
-            tickers += _finviz_via_firecrawl(n - len(tickers))
             break
         rows = re.findall(r'ticker=([A-Z\-.]+)', r.text)
         new = [t for t in rows if t not in tickers]
@@ -68,26 +72,31 @@ def fetch_finviz_top(n=TOP_N_SCREEN):
             break
         tickers += new
         page += 1
-    return tickers[:n]
+
+    if finviz_ok and tickers:
+        return tickers[:n]
+
+    # Finviz unreachable — fall back to full S&P 500 universe via yfinance
+    print("[fallback] Finviz unreachable, building universe from S&P 500 + yfinance…")
+    return _sp500_momentum_top(n)
 
 
-def _finviz_via_firecrawl(n):
-    """Fallback: use Firecrawl MCP to fetch Finviz when direct access is blocked."""
-    # This is called only when requests() fails; it uses the Firecrawl MCP tool
-    # via a subprocess call to the CLI. In practice the GitHub Actions runner can
-    # reach Finviz directly; this path is for local dev inside the cloud container.
-    try:
-        import subprocess, json as _json
-        result = subprocess.run(
-            ["python", "-c",
-             f"import requests; r=requests.get({FINVIZ_SCREEN!r},"
-             "headers={'User-Agent':'Mozilla/5.0'},timeout=30); print(r.text[:50000])"],
-            capture_output=True, text=True, timeout=40
-        )
-        rows = re.findall(r'ticker=([A-Z\-.]+)', result.stdout)
-        return list(dict.fromkeys(rows))[:n]
-    except Exception:
-        return []
+def _sp500_momentum_top(n):
+    """Build a top-n list from S&P 500 using price momentum (12-1 month)."""
+    from strategy import download_prices, indicators, rank_candidates, sp500_constituents
+    sectors = sp500_constituents()
+    tickers = list(sectors.keys())
+    start = (date.today() - timedelta(days=400)).isoformat()
+    prices = download_prices(tickers, start=start)
+    if prices.empty:
+        print("ERROR: yfinance returned no price data.", file=sys.stderr)
+        sys.exit(1)
+    today_prices = prices.iloc[-1]
+    sma, mom = indicators(prices)
+    today_sma = sma.iloc[-1]
+    today_mom = mom.iloc[-1]
+    ranked = rank_candidates(today_prices, today_sma, today_mom, sectors=sectors)
+    return ranked[:n]
 
 
 # ── quality & scoring ─────────────────────────────────────────────────────────
