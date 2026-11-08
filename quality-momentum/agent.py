@@ -434,8 +434,21 @@ def run(execute=False, dry_run_data=None):
         "all_scored": [{k: v for k, v in c.items() if k != "detail"} for c in candidates[:25]],
     }
 
+    class _NumpyEncoder(json.JSONEncoder):
+        def default(self, obj):
+            import numpy as np
+            if isinstance(obj, (np.integer,)):
+                return int(obj)
+            if isinstance(obj, (np.floating,)):
+                return float(obj)
+            if isinstance(obj, (np.bool_,)):
+                return bool(obj)
+            if isinstance(obj, (np.ndarray,)):
+                return obj.tolist()
+            return super().default(obj)
+
     with open("report.json", "w") as f:
-        json.dump(report, f, indent=2)
+        json.dump(report, f, indent=2, cls=_NumpyEncoder)
 
     # 6. PRINT SUMMARY
     print(f"\n{'='*60}")
