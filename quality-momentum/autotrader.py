@@ -2,6 +2,9 @@
 
 Runs once every weekday after the US close (see .github/workflows/autotrader.yml):
   * every day: sell any holding 20% below its entry price (rule 12)
+  * every Friday (weekly check): cut any holding that has underperformed SPY by
+    8+ percentage points over the past 4 weeks — avoids waiting a full month to
+    exit a deteriorating position
   * last trading day of the month: crash brake + full rebalance (rules 1-11)
   * every action is sent to your phone (ntfy) and the GitHub run summary
 
@@ -13,6 +16,7 @@ Settings come from environment variables (GitHub secrets):
   NTFY_TOPIC                         your private ntfy topic name (phone alerts)
   STRATEGY_FRACTION                  share of the account the strategy may use (default 1.0)
   LIVE_TRADING                       leave unset. Only "yes-real-money" switches to a live account.
+  MIN_CAPITAL_USD                    minimum account equity required to trade (default 500)
 
     python autotrader.py               # normal run
     python autotrader.py --dry-run     # decide and notify, but place no orders
@@ -150,6 +154,30 @@ def run(broker, today, dry_run=False, force_monthly=False, fraction=1.0, data=No
             to_sell.add(t)
             notes.append(f"Stop: {t} at {price:.2f} is 20%+ below entry {h['entry']:.2f}.")
 
+    # Weekly relative-strength cut (every Friday): sell any holding that has
+    # underperformed SPY by 8+ percentage points over the last 4 weeks.
+    # This avoids carrying losers for a full month when momentum has clearly broken.
+    if pd.Timestamp(today).day_of_week == 4:  # Friday = 4
+        spy_4w = float(spy_series.iloc[-1] / spy_series.iloc[-20] - 1) if len(spy_series) >= 20 else None
+        if spy_4w is not None:
+            all_prices_map = prices  # use the loaded price frame
+            for t, h in held.items():
+                if t in to_sell:
+                    continue
+                try:
+                    t_series = all_prices_map[t].dropna()
+                    if len(t_series) >= 20:
+                        t_4w = float(t_series.iloc[-1] / t_series.iloc[-20] - 1)
+                        lag = t_4w - spy_4w
+                        if lag <= -0.08:
+                            to_sell.add(t)
+                            notes.append(
+                                f"Weekly cut: {t} 4-week return {t_4w:+.1%} vs SPY {spy_4w:+.1%} "
+                                f"(lag {lag:+.1%} ≤ -8%). Exiting early."
+                            )
+                except (KeyError, IndexError):
+                    pass
+
     targets = None
     if monthly:
         targets, n = plan_monthly(held, close, sma, mom, spy, spy_sma, sectors)
@@ -210,7 +238,22 @@ def main():
     if live:
         notify(["LIVE_TRADING is on: this run uses REAL money."], "Quality Momentum: LIVE")
     fraction = min(max(float(os.environ.get("STRATEGY_FRACTION", "1.0")), 0.0), 1.0)
+    min_capital = float(os.environ.get("MIN_CAPITAL_USD", "500"))
     broker = Alpaca(key, secret, live=live)
+
+    # Capital floor check — refuse to trade below the minimum.
+    try:
+        equity = float(broker.account()["equity"])
+    except Exception as e:
+        notify([f"Could not fetch account equity: {e}"], "Quality Momentum: error")
+        raise
+    if equity < min_capital:
+        msg = (f"Account equity ${equity:,.2f} is below the ${min_capital:,.0f} minimum. "
+               f"Top up your account before the robot will trade.")
+        notify([msg], "Quality Momentum: below minimum capital")
+        print(msg)
+        sys.exit(0)
+
     try:
         run(broker, date.today(), a.dry_run, a.force_monthly, fraction)
     except Exception as e:
