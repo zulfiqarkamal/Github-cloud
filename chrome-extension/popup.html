@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TradingView Webhook Wirer</title>
+<style>
+  body { font-family: system-ui, sans-serif; width: 420px; padding: 16px; margin: 0; background: #0f172a; color: #e2e8f0; }
+  h2 { margin: 0 0 14px; font-size: 15px; color: #38bdf8; }
+  label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 3px; }
+  input[type=text], input[type=password] {
+    width: 100%; box-sizing: border-box; padding: 7px 9px;
+    border: 1px solid #334155; border-radius: 6px;
+    background: #1e293b; color: #e2e8f0; font-size: 13px; margin-bottom: 10px;
+  }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .row input[type=checkbox] { width: 16px; height: 16px; }
+  .row label { margin: 0; font-size: 13px; color: #e2e8f0; }
+  button#setup {
+    width: 100%; padding: 9px; background: #0ea5e9; color: #fff;
+    border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 600;
+  }
+  button#setup:disabled { background: #334155; color: #64748b; cursor: default; }
+  #log { margin-top: 12px; font-size: 12px; line-height: 1.6; min-height: 20px; }
+  .step { color: #94a3b8; }
+  .step.ok { color: #4ade80; }
+  .step.err { color: #f87171; }
+  #results { display: none; margin-top: 14px; background: #1e293b; border-radius: 8px; padding: 12px; }
+  #results h3 { margin: 0 0 10px; font-size: 13px; color: #4ade80; }
+  .result-row { margin-bottom: 10px; }
+  .result-row label { font-size: 11px; color: #94a3b8; }
+  .copy-box { display: flex; gap: 6px; margin-top: 3px; }
+  .copy-box input { flex: 1; padding: 5px 8px; background: #0f172a; border: 1px solid #334155; border-radius: 4px; color: #fbbf24; font-size: 12px; font-family: monospace; }
+  .copy-box button { padding: 5px 10px; background: #334155; color: #e2e8f0; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
+  .copy-box button:hover { background: #475569; }
+</style>
+</head>
+<body>
+<h2>TradingView Webhook Wirer</h2>
+
+<label>Cloudflare Account ID</label>
+<input type="text" id="cfAccountId" placeholder="a1b2c3d4e5f6…">
+
+<label>Cloudflare API Token (Workers:Edit)</label>
+<input type="password" id="cfToken" placeholder="your-cf-token">
+
+<label>GitHub Personal Access Token (actions:write)</label>
+<input type="password" id="ghToken" placeholder="ghp_…">
+
+<div class="row">
+  <input type="checkbox" id="dryRun" checked>
+  <label for="dryRun">DRY_RUN mode (no real trades)</label>
+</div>
+
+<button id="setup">Set up webhook wiring</button>
+
+<div id="log"></div>
+
+<div id="results">
+  <h3>Setup complete — copy these into TradingView</h3>
+  <div class="result-row">
+    <label>Worker URL (paste as webhook URL in TradingView alert)</label>
+    <div class="copy-box">
+      <input type="text" id="workerUrl" readonly>
+      <button onclick="copyVal('workerUrl')">Copy</button>
+    </div>
+  </div>
+  <div class="result-row">
+    <label>WEBHOOK_SECRET (paste as the secret in TradingView alert)</label>
+    <div class="copy-box">
+      <input type="text" id="webhookSecret" readonly>
+      <button onclick="copyVal('webhookSecret')">Copy</button>
+    </div>
+  </div>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

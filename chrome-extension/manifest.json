@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "TradingView Webhook Wirer",
+  "version": "1.0",
+  "description": "Deploy Cloudflare Worker + wire TradingView webhook in one click",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "TradingView Webhook Wirer"
+  },
+  "permissions": [],
+  "host_permissions": [
+    "https://api.cloudflare.com/*",
+    "https://raw.githubusercontent.com/*"
+  ]
+}
