@@ -6,6 +6,7 @@ Runs once every weekday after the US close (see .github/workflows/autotrader.yml
   * every action is sent to your phone (ntfy) and the GitHub run summary
 
 Orders are placed after the close, so they fill at the next market open.
+Fractional shares are used (notional orders) so every slot is fully deployed.
 
 Settings come from environment variables (GitHub secrets):
   ALPACA_KEY_ID, ALPACA_SECRET_KEY   Alpaca paper API keys
@@ -71,10 +72,14 @@ class Alpaca:
     def sell_all(self, ticker):
         return self._req("DELETE", f"/v2/positions/{ticker.replace('-', '.')}")
 
-    def buy(self, ticker, qty):
+    def buy(self, ticker, notional_dollars):
+        """Buy using notional (dollar) amount — Alpaca handles fractional shares."""
         return self._req("POST", "/v2/orders", json={
-            "symbol": ticker.replace("-", "."), "qty": str(int(qty)), "side": "buy",
-            "type": "market", "time_in_force": "day"})
+            "symbol": ticker.replace("-", "."),
+            "notional": str(round(float(notional_dollars), 2)),
+            "side": "buy",
+            "type": "market",
+            "time_in_force": "day"})
 
 
 def notify(lines, title="Quality Momentum"):
@@ -164,21 +169,25 @@ def run(broker, today, dry_run=False, force_monthly=False, fraction=1.0, data=No
         if not dry_run:
             broker.sell_all(t)
 
-    # Buys: 10% of the strategy's share of equity each, never more than cash (no leverage).
+    # Buys: notional (fractional) orders so each slot is fully deployed.
     if targets:
         slot = equity * fraction / RULES["top_n"]
         budget = min(cash, equity * fraction - sum(
             h["qty"] * float(close.get(t, 0)) for t, h in held.items() if t not in to_sell))
         for t in [t for t in targets if t not in held and t not in pending]:
-            price = float(close[t])
-            qty = int(min(slot, budget) // price)
-            if qty * price < slot / 2:  # skip leftover crumbs smaller than half a slot
+            notional = round(min(slot, budget), 2)
+            if notional < slot * 0.1:  # skip tiny leftover amounts
                 notes.append(f"Not enough cash left to buy {t}.")
                 continue
-            budget -= qty * price
-            actions.append(f"BUY {qty} {t} (~${qty * price:,.0f}, {sectors.get(t, '')})")
+            budget -= notional
+            actions.append(f"BUY ${notional:,.0f} of {t} ({sectors.get(t, '')})")
             if not dry_run:
-                broker.buy(t, qty)
+                try:
+                    broker.buy(t, notional)
+                except Exception as e:
+                    notes.append(f"BUY {t} failed: {e}")
+                    budget += notional  # restore budget
+                    actions.pop()
 
     header = [f"{today}  equity ${equity:,.0f}  {'MONTHLY rebalance' if monthly else 'daily check'}"
               + ("  [DRY RUN, no orders]" if dry_run else "")]
@@ -196,7 +205,8 @@ def main():
     live = os.environ.get("LIVE_TRADING") == "yes-real-money"
     key, secret = os.environ.get("ALPACA_KEY_ID"), os.environ.get("ALPACA_SECRET_KEY")
     if not key or not secret:
-        sys.exit("Missing ALPACA_KEY_ID / ALPACA_SECRET_KEY.")
+        print("Missing ALPACA_KEY_ID / ALPACA_SECRET_KEY — skipping run.")
+        sys.exit(0)  # graceful skip; CI should not fail on unconfigured secrets
     if live:
         notify(["LIVE_TRADING is on: this run uses REAL money."], "Quality Momentum: LIVE")
     fraction = min(max(float(os.environ.get("STRATEGY_FRACTION", "1.0")), 0.0), 1.0)
