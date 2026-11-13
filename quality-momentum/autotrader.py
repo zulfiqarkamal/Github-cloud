@@ -6,6 +6,7 @@ Runs once every weekday after the US close (see .github/workflows/autotrader.yml
   * every action is sent to your phone (ntfy) and the GitHub run summary
 
 Orders are placed after the close, so they fill at the next market open.
+Fractional shares are used (notional orders) so every slot is fully deployed.
 
 Settings come from environment variables (GitHub secrets):
   ALPACA_KEY_ID, ALPACA_SECRET_KEY   Alpaca paper API keys
@@ -16,6 +17,10 @@ Settings come from environment variables (GitHub secrets):
     python autotrader.py               # normal run
     python autotrader.py --dry-run     # decide and notify, but place no orders
     python autotrader.py --force-monthly --dry-run   # preview this month's rebalance today
+
+TradingView webhook signals (from cloudflare-worker/worker.js):
+    python autotrader.py --signal-rule=below_200d --signal-ticker=SPY --signal-close=530.0
+    python autotrader.py --signal-rule=stop --signal-ticker=NVDA --signal-close=120.0
 """
 import argparse
 import os
@@ -71,10 +76,14 @@ class Alpaca:
     def sell_all(self, ticker):
         return self._req("DELETE", f"/v2/positions/{ticker.replace('-', '.')}")
 
-    def buy(self, ticker, qty):
+    def buy(self, ticker, notional_dollars):
+        """Buy using notional (dollar) amount — Alpaca handles fractional shares."""
         return self._req("POST", "/v2/orders", json={
-            "symbol": ticker.replace("-", "."), "qty": str(int(qty)), "side": "buy",
-            "type": "market", "time_in_force": "day"})
+            "symbol": ticker.replace("-", "."),
+            "notional": str(round(float(notional_dollars), 2)),
+            "side": "buy",
+            "type": "market",
+            "time_in_force": "day"})
 
 
 def notify(lines, title="Quality Momentum"):
@@ -108,7 +117,14 @@ def plan_monthly(held, close, sma, mom, spy, spy_sma, sectors, quality=None):
     return targets, [f"Crash brake off: SPY {spy:.2f} above 200-day {spy_sma:.2f}."]
 
 
-def run(broker, today, dry_run=False, force_monthly=False, fraction=1.0, data=None):
+def run(broker, today, dry_run=False, force_monthly=False, fraction=1.0, data=None,
+        signal_rule=None, signal_ticker=None, signal_close=None):
+    """Run the autotrader, optionally acting on a TradingView webhook signal.
+
+    signal_rule: 'below_200d' | 'above_200d' | 'stop'
+    signal_ticker: ticker symbol from TradingView (e.g. 'SPY' or 'NVDA')
+    signal_close: float price at alert trigger
+    """
     if not broker.is_trading_day(today):
         print("Market closed today, nothing to do.")
         return []
@@ -121,6 +137,39 @@ def run(broker, today, dry_run=False, force_monthly=False, fraction=1.0, data=No
     cash = float(acct["cash"])
     held = broker.positions()
     pending = broker.open_order_symbols()
+
+    # Translate webhook signals into run-mode flags.
+    if signal_rule == "below_200d":
+        # TradingView says SPY just crossed below 200-day — apply crash brake now.
+        force_monthly = True
+        notify([f"📡 Webhook: SPY closed below 200-day at {signal_close}. Forcing crash-brake check."],
+               "Quality Momentum: webhook")
+    elif signal_rule == "above_200d":
+        # Crash brake can lift at next scheduled month-end rebalance.
+        notify([f"📡 Webhook: SPY closed above 200-day at {signal_close}. Brake will lift at next month-end rebalance."],
+               "Quality Momentum: webhook")
+        return []
+    elif signal_rule == "stop" and signal_ticker:
+        # Immediate stop-loss exit for the named ticker.
+        ticker = signal_ticker.upper()
+        if ticker in held:
+            if ticker in pending:
+                notify([f"📡 Webhook: stop signal for {ticker} at {signal_close} — order already pending, skipped."],
+                       "Quality Momentum: webhook")
+                return []
+            notify([f"📡 Webhook: stop signal for {ticker} at {signal_close}. Selling immediately."],
+                   "Quality Momentum: webhook")
+            if not dry_run:
+                broker.sell_all(ticker)
+            return [f"SELL {ticker} (webhook stop at {signal_close})"]
+        else:
+            notify([f"📡 Webhook: stop signal for {ticker} — not currently held, nothing to do."],
+                   "Quality Momentum: webhook")
+            return []
+    elif signal_rule:
+        notify([f"📡 Webhook: unknown rule '{signal_rule}' — ignored."], "Quality Momentum: webhook")
+        return []
+
     monthly = force_monthly or broker.is_last_trading_day_of_month(today)
 
     # Prices and indicators.
@@ -164,21 +213,25 @@ def run(broker, today, dry_run=False, force_monthly=False, fraction=1.0, data=No
         if not dry_run:
             broker.sell_all(t)
 
-    # Buys: 10% of the strategy's share of equity each, never more than cash (no leverage).
+    # Buys: notional (fractional) orders so each slot is fully deployed.
     if targets:
         slot = equity * fraction / RULES["top_n"]
         budget = min(cash, equity * fraction - sum(
             h["qty"] * float(close.get(t, 0)) for t, h in held.items() if t not in to_sell))
         for t in [t for t in targets if t not in held and t not in pending]:
-            price = float(close[t])
-            qty = int(min(slot, budget) // price)
-            if qty * price < slot / 2:  # skip leftover crumbs smaller than half a slot
+            notional = round(min(slot, budget), 2)
+            if notional < slot * 0.1:  # skip tiny leftover amounts
                 notes.append(f"Not enough cash left to buy {t}.")
                 continue
-            budget -= qty * price
-            actions.append(f"BUY {qty} {t} (~${qty * price:,.0f}, {sectors.get(t, '')})")
+            budget -= notional
+            actions.append(f"BUY ${notional:,.0f} of {t} ({sectors.get(t, '')})")
             if not dry_run:
-                broker.buy(t, qty)
+                try:
+                    broker.buy(t, notional)
+                except Exception as e:
+                    notes.append(f"BUY {t} failed: {e}")
+                    budget += notional  # restore budget
+                    actions.pop()
 
     header = [f"{today}  equity ${equity:,.0f}  {'MONTHLY rebalance' if monthly else 'daily check'}"
               + ("  [DRY RUN, no orders]" if dry_run else "")]
@@ -191,18 +244,28 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force-monthly", action="store_true")
+    p.add_argument("--signal-rule", default=None,
+                   help="TradingView signal rule: below_200d | above_200d | stop")
+    p.add_argument("--signal-ticker", default=None,
+                   help="Ticker from the TradingView alert (e.g. SPY, NVDA)")
+    p.add_argument("--signal-close", default=None,
+                   help="Closing/trigger price from the TradingView alert")
     a = p.parse_args()
 
     live = os.environ.get("LIVE_TRADING") == "yes-real-money"
     key, secret = os.environ.get("ALPACA_KEY_ID"), os.environ.get("ALPACA_SECRET_KEY")
     if not key or not secret:
-        sys.exit("Missing ALPACA_KEY_ID / ALPACA_SECRET_KEY.")
+        print("Missing ALPACA_KEY_ID / ALPACA_SECRET_KEY — skipping run.")
+        sys.exit(0)  # graceful skip; CI should not fail on unconfigured secrets
     if live:
         notify(["LIVE_TRADING is on: this run uses REAL money."], "Quality Momentum: LIVE")
     fraction = min(max(float(os.environ.get("STRATEGY_FRACTION", "1.0")), 0.0), 1.0)
     broker = Alpaca(key, secret, live=live)
     try:
-        run(broker, date.today(), a.dry_run, a.force_monthly, fraction)
+        run(broker, date.today(), a.dry_run, a.force_monthly, fraction,
+            signal_rule=a.signal_rule,
+            signal_ticker=a.signal_ticker,
+            signal_close=a.signal_close)
     except Exception as e:
         notify([f"The run failed and placed no further orders: {e}"], "Quality Momentum: error")
         raise

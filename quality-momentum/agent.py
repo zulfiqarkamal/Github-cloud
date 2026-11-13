@@ -4,10 +4,11 @@ Combines the Quality Momentum quantitative screen with Claude AI analysis to
 produce a prioritised buy/hold/sell list each trading day.
 
 Pipeline:
-  1. SCREEN  — fetch Finviz top-performers (must-haves pre-applied by URL filter)
-  2. SCORE   — apply M1-M5 must-haves and S1-S8 points (0-10) using yfinance data
-  3. GENERATE — Claude synthesises a plain-English signal with confidence + reasoning
-  4. EXECUTE  — optionally place paper orders on Alpaca
+  1. LOAD    — download S&P 500 prices (same source as autotrader.py)
+  2. SCREEN  — filter by momentum, above 200-day SMA, price >= $10
+  3. SCORE   — apply M1-M5 must-haves and S1-S8 points (0-10) using yfinance data
+  4. GENERATE — Claude synthesises a plain-English signal with confidence + reasoning
+  5. EXECUTE  — optionally place paper orders on Alpaca
 
 Usage:
     python agent.py                      # dry run, prints report + writes report.json
@@ -22,9 +23,8 @@ Env vars (same as autotrader.py):
 import argparse
 import json
 import os
-import re
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import pandas as pd
 import requests
@@ -33,61 +33,10 @@ from strategy import RULES, download_prices, indicators, sp500_constituents
 
 # ── constants ────────────────────────────────────────────────────────────────
 
-FINVIZ_SCREEN = (
-    "https://finviz.com/screener.ashx?v=111"
-    "&f=cap_midover,geo_usa,fa_pe_profitable,fa_salesqoq_pos,ta_sma200_pa"
-    ",sh_avgvol_o500,sh_price_o5"
-    "&o=-perf26w"
-)
-
-TOP_N_SCREEN = 25        # candidates pulled from Finviz
+TOP_N_SCREEN = 25        # candidates pulled from the screener
 TIER_A_THRESHOLD = 7     # min score to be eligible for buying
 MAX_POSITIONS = 5        # max open positions
 MAX_PER_SECTOR = 2
-
-
-# ── Finviz screener ───────────────────────────────────────────────────────────
-
-def fetch_finviz_top(n=TOP_N_SCREEN):
-    """Return top-n tickers (best 6-month perf) from the must-have Finviz screen."""
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; research-bot/1.0)"}
-    tickers = []
-    page = 1
-    while len(tickers) < n:
-        url = FINVIZ_SCREEN + f"&r={(page - 1) * 20 + 1}"
-        try:
-            r = requests.get(url, headers=headers, timeout=20)
-            r.raise_for_status()
-        except requests.RequestException:
-            # Fallback: try via Firecrawl proxy if direct is blocked
-            tickers += _finviz_via_firecrawl(n - len(tickers))
-            break
-        rows = re.findall(r'ticker=([A-Z\-.]+)', r.text)
-        new = [t for t in rows if t not in tickers]
-        if not new:
-            break
-        tickers += new
-        page += 1
-    return tickers[:n]
-
-
-def _finviz_via_firecrawl(n):
-    """Fallback: use Firecrawl MCP to fetch Finviz when direct access is blocked."""
-    # This is called only when requests() fails; it uses the Firecrawl MCP tool
-    # via a subprocess call to the CLI. In practice the GitHub Actions runner can
-    # reach Finviz directly; this path is for local dev inside the cloud container.
-    try:
-        import subprocess, json as _json
-        result = subprocess.run(
-            ["python", "-c",
-             f"import requests; r=requests.get({FINVIZ_SCREEN!r},"
-             "headers={'User-Agent':'Mozilla/5.0'},timeout=30); print(r.text[:50000])"],
-            capture_output=True, text=True, timeout=40
-        )
-        rows = re.findall(r'ticker=([A-Z\-.]+)', result.stdout)
-        return list(dict.fromkeys(rows))[:n]
-    except Exception:
-        return []
 
 
 # ── quality & scoring ─────────────────────────────────────────────────────────
@@ -112,7 +61,7 @@ def score_ticker(ticker, sector, close_price, sma200, mom6, spy_mom3, spy_mom6, 
         return False, 0, {}, f"data error: {e}"
 
     # ── Must-haves ──────────────────────────────────────────────────────────
-    # M1: cap >= $1B, avg vol >= 500k, price >= $5  (mostly filtered by Finviz URL)
+    # M1: cap >= $1B, price >= $10 (filtered upstream)
     mkt_cap = _safe_float(full.get("marketCap"), 0)
     if mkt_cap < 1e9:
         return False, 0, {}, f"M1 market cap {mkt_cap/1e9:.1f}B < 1B"
@@ -124,13 +73,13 @@ def score_ticker(ticker, sector, close_price, sma200, mom6, spy_mom3, spy_mom6, 
     if ni is None or ni <= 0:
         # fast-grower exception: revenue up 25%+ and positive OCF
         if rev_growth is not None and rev_growth >= 0.25 and ocf is not None and ocf > 0:
-            pass  # fast-grower exception
+            pass
         else:
             return False, 0, {}, "M2 not profitable (no fast-grower exception)"
     if rev_growth is None or rev_growth <= 0:
         return False, 0, {}, "M2 revenue not growing"
 
-    # M3: price above 200-day — already filtered by Finviz, but double-check
+    # M3: price above 200-day — already filtered upstream, double-check
     if close_price <= sma200:
         return False, 0, {}, f"M3 price {close_price:.2f} < 200-day {sma200:.2f}"
 
@@ -143,7 +92,7 @@ def score_ticker(ticker, sector, close_price, sma200, mom6, spy_mom3, spy_mom6, 
     score = 0
     detail = {}
 
-    # S1: momentum 2pts — top third of screened list = 2, better than SPY 6m = 1
+    # S1: momentum 2pts — top third = 2, better than SPY 6m = 1
     top_third_cut = sorted(all_moms, reverse=True)[max(0, len(all_moms) // 3 - 1)]
     if mom6 >= top_third_cut:
         s1 = 2
@@ -153,14 +102,11 @@ def score_ticker(ticker, sector, close_price, sma200, mom6, spy_mom3, spy_mom6, 
         s1 = 0
     score += s1; detail["S1"] = s1
 
-    # S2: relative strength — 3-month better than SPY
-    # We use 6m/2 as a proxy for 3m when we don't have separate 3m data
-    # (actual 3m comes from the same mom series with different shift)
+    # S2: relative strength — better than SPY 3-month proxy
     s2 = 1 if mom6 > spy_mom3 else 0
     score += s2; detail["S2"] = s2
 
     # S3: EBIT growth 2pts
-    op_margins = full.get("operatingMargins")
     ebitda_growth = _safe_float(full.get("earningsGrowth"), None)
     if ebitda_growth is not None:
         if ebitda_growth >= 0.20:
@@ -173,14 +119,10 @@ def score_ticker(ticker, sector, close_price, sma200, mom6, spy_mom3, spy_mom6, 
         s3 = 0
     score += s3; detail["S3"] = s3
 
-    # S4: estimates raised / EPS beats
-    eps_surprise_hist = full.get("earningsHistory")
-    s4 = 0
+    # S4: estimates raised / analyst target >10% above price, 3+ analysts
     analyst_count = _safe_float(full.get("numberOfAnalystOpinions"), 0)
     target_mean = _safe_float(full.get("targetMeanPrice"), None)
-    # Simple proxy: if analyst target exists and is >10% above price → likely positive revisions
-    if target_mean and target_mean > close_price * 1.10 and analyst_count >= 3:
-        s4 = 1
+    s4 = 1 if target_mean and target_mean > close_price * 1.10 and analyst_count >= 3 else 0
     score += s4; detail["S4"] = s4
 
     # S5: PEG < 1.5
@@ -188,7 +130,7 @@ def score_ticker(ticker, sector, close_price, sma200, mom6, spy_mom3, spy_mom6, 
     s5 = 1 if peg is not None and 0 < peg < 1.5 else 0
     score += s5; detail["S5"] = s5
 
-    # S6: forward P/E vs history (approximation using trailing P/E vs sector median)
+    # S6: forward P/E reasonable
     fwd_pe = _safe_float(full.get("forwardPE"), None)
     trail_pe = _safe_float(full.get("trailingPE"), None)
     s6 = 0
@@ -203,9 +145,27 @@ def score_ticker(ticker, sector, close_price, sma200, mom6, spy_mom3, spy_mom6, 
     s7 = 1 if upside is not None and upside >= 0.15 and analyst_count >= 3 else 0
     score += s7; detail["S7"] = s7
 
-    # S8: catalyst — approximate by recent insider buying or earnings within 45 days
-    # (Real catalyst check needs news/SEC; here we flag as unknown → 0 pts)
+    # S8: catalyst — earnings within the next 30 days (momentum + upcoming catalyst)
     s8 = 0
+    try:
+        import yfinance as yf
+        cal = yf.Ticker(ticker).calendar
+        if cal is not None:
+            # yfinance returns a dict with 'Earnings Date' as a list of timestamps
+            ear = cal.get("Earnings Date") if isinstance(cal, dict) else None
+            if ear is None and hasattr(cal, "get"):
+                ear = cal.get("Earnings Date")
+            if ear is not None:
+                for d in (ear if hasattr(ear, "__iter__") else [ear]):
+                    try:
+                        days_ahead = (pd.Timestamp(d).date() - date.today()).days
+                        if 0 <= days_ahead <= 30:
+                            s8 = 1
+                            break
+                    except Exception:
+                        pass
+    except Exception:
+        pass
     score += s8; detail["S8"] = s8
 
     fundamentals = {
@@ -218,6 +178,7 @@ def score_ticker(ticker, sector, close_price, sma200, mom6, spy_mom3, spy_mom6, 
         "analyst_count": int(analyst_count) if analyst_count else 0,
         "short_pct": round(short_pct * 100, 1) if short_pct else None,
         "sector": sector,
+        "earnings_in_30d": bool(s8),
     }
     detail.update(fundamentals)
     return True, score, detail, ""
@@ -237,17 +198,18 @@ def generate_signals_with_ai(candidates, spy_status, today, top_held):
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
 
-    # Build a compact summary of scored candidates for the prompt
     lines = []
     for c in candidates[:15]:
         tier = "A" if c["score"] >= TIER_A_THRESHOLD else "B" if c["score"] >= 5 else "C"
         d = c["detail"]
+        ear_flag = " [EARNINGS SOON]" if d.get("earnings_in_30d") else ""
         lines.append(
             f"  {c['ticker']} ({d.get('sector','?')}) tier={tier} score={c['score']}/10 "
-            f"mom6m={c['mom6m']:+.0%} revgrowth={d.get('rev_growth','?')}% "
+            f"mom12m={c['mom6m']:+.0%} revgrowth={d.get('rev_growth','?')}% "
             f"ebitda_g={d.get('ebitda_growth','?')}% PEG={d.get('peg','?')} "
             f"fwdPE={d.get('fwd_pe','?')} analysts={d.get('analyst_count','?')} "
             f"target=${d.get('analyst_target','?')} short={d.get('short_pct','?')}%"
+            f"{ear_flag}"
         )
 
     held_str = ", ".join(top_held) if top_held else "none"
@@ -267,6 +229,8 @@ Your job:
 2. Identify the top 3 BUY recommendations for today (Tier A only). If SPY is below 200-day, say "No new positions — crash brake active."
 3. For current holdings, say HOLD or SELL with one-line rationale.
 4. End with a 2-line SUMMARY: total open slots to fill, single most important risk today.
+
+Note: [EARNINGS SOON] means the company reports earnings within 30 days — factor this into your confidence.
 
 Be direct and brief. No hedging, no disclaimers. Focus on profit."""
 
@@ -305,15 +269,9 @@ def execute_on_alpaca(buy_tickers, sell_tickers, close_prices, capital_fraction=
             actions.append(f"SELL {t} failed: {e}")
 
     for t in buy_tickers:
-        price = close_prices.get(t)
-        if not price:
-            continue
-        qty = int(slot // price)
-        if qty < 1:
-            continue
         try:
-            broker.buy(t, qty)
-            actions.append(f"BOUGHT {qty} {t} @ ~{price:.2f}")
+            broker.buy(t, slot)
+            actions.append(f"BOUGHT ${slot:,.0f} of {t}")
         except Exception as e:
             actions.append(f"BUY {t} failed: {e}")
 
@@ -326,37 +284,29 @@ def execute_on_alpaca(buy_tickers, sell_tickers, close_prices, capital_fraction=
 def run(execute=False, dry_run_data=None):
     today = str(date.today())
 
-    # 1. SCREEN
-    print(f"[{today}] Fetching Finviz top {TOP_N_SCREEN} candidates…")
-    if dry_run_data:
-        tickers = dry_run_data["tickers"]
-    else:
-        tickers = fetch_finviz_top(TOP_N_SCREEN)
-    if not tickers:
-        print("Could not fetch Finviz screener. Aborting.")
-        sys.exit(1)
-    print(f"  Screened: {', '.join(tickers[:10])}{'…' if len(tickers)>10 else ''}")
-
-    # 2. PRICE DATA
-    print("  Downloading prices…")
+    # 1. LOAD UNIVERSE — S&P 500 from Wikipedia + yfinance (no Finviz dependency)
+    print(f"[{today}] Loading S&P 500 universe…")
     sectors = sp500_constituents()
     start = (pd.Timestamp(today) - pd.DateOffset(months=14)).strftime("%Y-%m-%d")
-    universe = sorted(set(tickers) | {"SPY"})
+
     if dry_run_data:
-        prices = dry_run_data["prices"]
+        tickers = dry_run_data["tickers"]
+        prices = dry_run_data["prices"].copy()
     else:
+        universe = sorted(set(sectors) | {"SPY"})
         prices = download_prices(universe, start).ffill()
 
+    if "SPY" not in prices.columns:
+        print("SPY data missing — skipping run.")
+        sys.exit(0)
     spy_series = prices.pop("SPY")
     sma_all, mom_all = indicators(prices)
+
     spy_sma200 = spy_series.rolling(200).mean().iloc[-1]
     spy_now = spy_series.iloc[-1]
-    spy_above_200 = spy_now >= spy_sma200
-
-    # SPY momentum proxies
+    spy_above_200 = bool(spy_now >= spy_sma200)
     spy_mom6 = float(spy_series.iloc[-1] / spy_series.iloc[-126] - 1) if len(spy_series) >= 126 else 0.0
     spy_mom3 = float(spy_series.iloc[-1] / spy_series.iloc[-63] - 1) if len(spy_series) >= 63 else 0.0
-
     spy_status = (
         f"{spy_now:.2f} (ABOVE 200-day {spy_sma200:.2f})" if spy_above_200
         else f"{spy_now:.2f} (BELOW 200-day {spy_sma200:.2f}) — crash brake ON"
@@ -366,47 +316,61 @@ def run(execute=False, dry_run_data=None):
     sma = sma_all.iloc[-1]
     mom = mom_all.iloc[-1]
 
-    # All 6m momentums for top-third calculation
+    # 2. SCREEN — top-N by 12-1 momentum, above 200-day SMA, price >= min_price
+    if not dry_run_data:
+        eligible = []
+        for t in prices.columns:
+            c = float(close.get(t) or 0)
+            s = float(sma.get(t) or 0)
+            m = float(mom.get(t)) if pd.notna(mom.get(t)) else 0.0
+            if c >= RULES["min_price"] and s > 0 and c > s:
+                eligible.append((t, m))
+        eligible.sort(key=lambda x: x[1], reverse=True)
+        tickers = [t for t, _ in eligible[:TOP_N_SCREEN]]
+
+    if not tickers:
+        print("No candidates passed the screen — skipping run.")
+        sys.exit(0)
+    print(f"  Top {len(tickers)}: {', '.join(tickers[:10])}{'…' if len(tickers)>10 else ''}")
+
     all_moms = [float(mom.get(t, 0)) for t in tickers if pd.notna(mom.get(t))]
 
     # 3. SCORE each ticker
     print("  Scoring candidates…")
     candidates = []
     for t in tickers:
-        close_p = float(close.get(t, 0))
-        sma200 = float(sma.get(t, 0))
-        mom6 = float(mom.get(t, 0)) if pd.notna(mom.get(t)) else 0.0
+        close_p = float(close.get(t) or 0)
+        sma200 = float(sma.get(t) or 0)
+        mom12 = float(mom.get(t)) if pd.notna(mom.get(t)) else 0.0
         if close_p == 0 or sma200 == 0:
             continue
         passed, score, detail, reason = score_ticker(
-            t, sectors.get(t, "Unknown"), close_p, sma200, mom6,
+            t, sectors.get(t, "Unknown"), close_p, sma200, mom12,
             spy_mom3, spy_mom6, all_moms
         )
         entry = {
             "ticker": t, "passed_must_haves": passed, "score": score,
             "detail": detail, "reject_reason": reason,
-            "close": round(close_p, 2), "mom6m": round(mom6, 4),
+            "close": round(close_p, 2), "mom6m": round(mom12, 4),
         }
         candidates.append(entry)
         status = f"✓ {score}/10" if passed else f"✗ {reason}"
         print(f"    {t:6} {status}")
 
-    # Sort by score descending, then momentum
     candidates.sort(key=lambda c: (c["passed_must_haves"], c["score"], c["mom6m"]), reverse=True)
     tier_a = [c for c in candidates if c["passed_must_haves"] and c["score"] >= TIER_A_THRESHOLD]
     tier_b = [c for c in candidates if c["passed_must_haves"] and 5 <= c["score"] < TIER_A_THRESHOLD]
 
     # 4. GENERATE — AI reasoning
     print("  Generating AI signal…")
-    # Existing holdings from autotrader (approximate from Alpaca if available)
     held = []
     if execute:
         from autotrader import Alpaca
         try:
-            key = os.environ.get("ALPACA_KEY_ID", "")
-            secret = os.environ.get("ALPACA_SECRET_KEY", "")
-            if key and secret:
-                broker = Alpaca(key, secret)
+            key_id = os.environ.get("ALPACA_KEY_ID", "")
+            sec = os.environ.get("ALPACA_SECRET_KEY", "")
+            if key_id and sec:
+                broker = Alpaca(key_id, sec)
                 held = list(broker.positions().keys())
         except Exception:
             pass
@@ -419,7 +383,8 @@ def run(execute=False, dry_run_data=None):
         "spy": {"price": round(float(spy_now), 2), "sma200": round(float(spy_sma200), 2),
                 "above_200d": spy_above_200},
         "tier_a": [{"ticker": c["ticker"], "score": c["score"], "close": c["close"],
-                    "mom6m": c["mom6m"], "sector": c["detail"].get("sector")} for c in tier_a],
+                    "mom6m": c["mom6m"], "sector": c["detail"].get("sector"),
+                    "earnings_in_30d": c["detail"].get("earnings_in_30d", False)} for c in tier_a],
         "tier_b": [{"ticker": c["ticker"], "score": c["score"]} for c in tier_b],
         "ai_signal": ai_text,
         "all_scored": [{k: v for k, v in c.items() if k != "detail"} for c in candidates[:25]],
@@ -433,21 +398,21 @@ def run(execute=False, dry_run_data=None):
     print(f"GENERATIVE TRADING AGENT — {today}")
     print(f"SPY: {spy_status}")
     print(f"{'='*60}")
-    print(f"\nTIER A (buy candidates, score ≥7):")
+    print(f"\nTIER A (buy candidates, score ≧7):")
     for c in tier_a[:5]:
-        print(f"  {c['ticker']:6} score={c['score']}/10  6m={c['mom6m']:+.0%}  ${c['close']:.2f}  {c['detail'].get('sector','')}")
+        ear = " [EARNINGS SOON]" if c["detail"].get("earnings_in_30d") else ""
+        print(f"  {c['ticker']:6} score={c['score']}/10  12m={c['mom6m']:+.0%}  ${c['close']:.2f}  {c['detail'].get('sector','')} {ear}")
     print(f"\nTIER B (watchlist, score 5-6):")
     for c in tier_b[:5]:
-        print(f"  {c['ticker']:6} score={c['score']}/10  6m={c['mom6m']:+.0%}")
+        print(f"  {c['ticker']:6} score={c['score']}/10  12m={c['mom6m']:+.0%}")
     print(f"\nAI SIGNAL:\n{ai_text}")
     print(f"\nFull report written to report.json")
 
     # 7. EXECUTE
     if execute and spy_above_200 and tier_a:
         buy_top = [c["ticker"] for c in tier_a[:3] if c["ticker"] not in held]
-        sell_stops = []  # stop-loss handled by autotrader.py daily check
         close_map = {c["ticker"]: c["close"] for c in candidates}
-        execute_on_alpaca(buy_top, sell_stops, close_map)
+        execute_on_alpaca(buy_top, [], close_map)
 
     return report
 
