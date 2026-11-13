@@ -1,0 +1,81 @@
+name: TradingView webhook signal
+
+# Triggered by the Cloudflare Worker proxy when TradingView fires an alert.
+# The worker validates the shared secret and calls the GitHub API; this workflow
+# then runs the autotrader with the signal context.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rule:
+        description: "Signal rule (below_200d | above_200d | stop | entry)"
+        required: true
+        type: string
+      ticker:
+        description: "Ticker symbol from TradingView (e.g. SPY)"
+        required: true
+        type: string
+      close:
+        description: "Closing / trigger price"
+        required: false
+        type: string
+        default: "0"
+      dry_run:
+        description: "Preview only — do NOT place orders"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: autotrader
+  cancel-in-progress: false
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: quality-momentum
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: quality-momentum/requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Log signal
+        run: |
+          echo "📡 TradingView signal received"
+          echo "  rule   : ${{ inputs.rule }}"
+          echo "  ticker : ${{ inputs.ticker }}"
+          echo "  close  : ${{ inputs.close }}"
+          echo "  dry_run: ${{ inputs.dry_run }}"
+
+      - name: Run autotrader with signal
+        env:
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          STRATEGY_FRACTION: ${{ vars.STRATEGY_FRACTION || '1.0' }}
+          LIVE_TRADING: ${{ vars.LIVE_TRADING }}
+          TV_RULE: ${{ inputs.rule }}
+          TV_TICKER: ${{ inputs.ticker }}
+          TV_CLOSE: ${{ inputs.close }}
+        run: |
+          ARGS="--signal-rule=${{ inputs.rule }} --signal-ticker=${{ inputs.ticker }} --signal-close=${{ inputs.close }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python autotrader.py $ARGS
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webhook-signal-${{ github.run_id }}
+          path: quality-momentum/report.json
+          retention-days: 30
