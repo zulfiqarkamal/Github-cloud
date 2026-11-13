@@ -244,6 +244,9 @@ Be direct and brief. No hedging, no disclaimers. Focus on profit."""
 
 # ── Alpaca execution ──────────────────────────────────────────────────────────
 
+MIN_CAPITAL_USD = float(os.environ.get("MIN_CAPITAL_USD", "500"))
+
+
 def execute_on_alpaca(buy_tickers, sell_tickers, close_prices, capital_fraction=1.0):
     """Place orders on Alpaca paper (or live if LIVE_TRADING=yes-real-money)."""
     from autotrader import Alpaca, notify
@@ -258,6 +261,13 @@ def execute_on_alpaca(buy_tickers, sell_tickers, close_prices, capital_fraction=
     broker = Alpaca(key, secret, live=live)
     acct = broker.account()
     equity = float(acct["equity"])
+
+    if equity < MIN_CAPITAL_USD:
+        msg = (f"Account equity ${equity:,.2f} is below the ${MIN_CAPITAL_USD:,.0f} minimum. "
+               f"Top up your account before the agent will place orders.")
+        notify([msg], "Generative Agent: below minimum capital")
+        print(msg)
+        return
     slot = equity * capital_fraction / MAX_POSITIONS
     actions = []
 
