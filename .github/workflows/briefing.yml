@@ -1,0 +1,30 @@
+name: Daily Trading Briefing
+
+on:
+  schedule:
+    # 9:00 AM ET on weekdays (14:00 UTC Nov–Mar, 13:00 UTC Mar–Nov — using 14:00 UTC year-round as a safe default)
+    - cron: "0 14 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests pandas numpy yfinance
+
+      - name: Run daily briefing
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          cd research
+          python briefing.py --out briefing_today.md
+          cat briefing_today.md >> $GITHUB_STEP_SUMMARY
