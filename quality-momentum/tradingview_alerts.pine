@@ -2,7 +2,10 @@
 // Quality Momentum helper for TradingView.
 // Add to a SPY chart for the crash-brake alert, or to a stock you hold
 // (enter your purchase price) for the exit and 20% stop alerts.
-// Alerts can go to email/app, or by webhook to n8n or SignalStack (IBKR paper).
+//
+// WEBHOOK SETUP: replace YOUR_CLOUDFLARE_WORKER_URL below with your worker URL,
+// and YOUR_WEBHOOK_SECRET with the secret you set in the Cloudflare Worker.
+// See TRADINGVIEW_WEBHOOK_SETUP.md for full instructions.
 indicator("Quality Momentum alerts", overlay=true)
 
 entryPrice = input.float(0.0, "Your entry price (0 = not held)", minval=0)
@@ -21,11 +24,19 @@ if barstate.islast
     table.cell(info, 0, 0, "12-1 momentum: " + str.tostring(mom121 * 100, "#.0") + "%")
     table.cell(info, 0, 1, close > sma200 ? "Above 200-day" : "BELOW 200-day")
 
+// ---------------------------------------------------------------------------
+// Alert conditions — each embeds the shared secret so the Cloudflare Worker
+// can validate the request before triggering GitHub Actions.
+//
+// Replace YOUR_WEBHOOK_SECRET with the value you set in the Worker.
+// ---------------------------------------------------------------------------
+
 // Rule 10 (on SPY): crash brake on / off.
 alertcondition(ta.crossunder(close, sma200), "Closed below 200-day",
-     '{"rule":"below_200d","ticker":"{{ticker}}","close":{{close}}}')
+     '{"rule":"below_200d","ticker":"{{ticker}}","close":{{close}},"secret":"YOUR_WEBHOOK_SECRET"}')
 alertcondition(ta.crossover(close, sma200), "Closed above 200-day",
-     '{"rule":"above_200d","ticker":"{{ticker}}","close":{{close}}}')
+     '{"rule":"above_200d","ticker":"{{ticker}}","close":{{close}},"secret":"YOUR_WEBHOOK_SECRET"}')
+
 // Rule 12: emergency stop on a holding.
 alertcondition(entryPrice > 0 and close <= stopLevel, "Stop hit (20% below entry)",
-     '{"rule":"stop","ticker":"{{ticker}}","close":{{close}}}')
+     '{"rule":"stop","ticker":"{{ticker}}","close":{{close}},"secret":"YOUR_WEBHOOK_SECRET"}')
